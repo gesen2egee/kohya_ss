@@ -2864,7 +2864,7 @@ def add_optimizer_arguments(parser: argparse.ArgumentParser):
         "--lr_scheduler",
         type=str,
         default="constant",
-        help="scheduler to use for learning rate / 学習率のスケジューラ: linear, cosine, cosine_with_restarts, polynomial, constant (default), constant_with_warmup, adafactor",
+        help="scheduler to use for learning rate / 学習率のスケジューラ: linear, cosine, cosine_with_restarts, polynomial, constant (default), constant_with_warmup, adafactor, rex",
     )
     parser.add_argument(
         "--lr_warmup_steps",
