@@ -1,3 +1,80 @@
+一個自用及分享的fork
+merge有興趣的PR
+
+安裝方式
+用正常安裝kohya gui
+
+!git remote add gesen2egee https://github.com/gesen2egee/kohya_ss
+!git pull gesen2egee master
+不需要改變venv和環境
+
+＊REX排程
+![image](https://github.com/gesen2egee/kohya_ss/assets/79357052/c9a207df-0bd9-4274-b4c3-65d02312d45b)
+來源:https://github.com/kohya-ss/sd-scripts/pull/1042
+論文:https://arxiv.org/abs/2107.04197
+
+聽說表現很好
+指令
+--lr_scheduler "REX"
+
+＊只用npz訓練
+
+來源:https://github.com/kohya-ss/sd-scripts/pull/933
+如果資料夾中只有npz會改成用npz讀取 
+
+
+＊停止te學習 
+
+來源:https://github.com/kohya-ss/sd-scripts/pull/1011
+提前停止te訓練 轉成只用u-net
+用GUI上的拉條 調整stop text encoder training就可以了
+
+
+＊Pivotal Tuning (emb+lora同時訓練)
+
+來源:https://github.com/kohya-ss/sd-scripts/pull/991
+如何使用
+準備好要放進去的emb，用新創建或是已經練好的都可以
+emb的檔名(XXX.pt)會替換掉字幕中的相同字 XXX, 1girl的權重  
+賽博貓的介紹 為什麼你該用 Pivotal Tuning
+https://civitai.com/articles/2494/making-better-loras-with-pivotal-tuning
+訓練時kohya gui指令加這些 (放在args裡)
+--embeddings "path/to/emb1" "path/to/emb2 --continue_inversion --embedding_lr "(數字，建議學習率1e-2)"
+
+創建emb方法
+
+pip install hcpdiff==0.6.
+python -m hcpdiff.tools.create_embedding deepghs/animefull-latest "名字" (tokens長度，一個數字) --init_text *(標準差，一個數字，建議0.1)
+--init_text 也可以指定創建用別的文字的權重  --init_text "文字"就好
+例如:python -m hcpdiff.tools.create_embedding deepghs/animefull-latest "{tag_name}" 4 --init_text *0.1
+python -m hcpdiff.tools.create_embedding deepghs/animefull-latest "{tag_name}" 4 --init_text 1girl
+
+如果要創建不隨機的emb也可以用webui的訓練功能，或是到c站找人練好的emb
+(注意！ 如果emb名已經有的相同 (emb name == 1 token) 會無法訓練
+另外發現一個不知道是不是BUG，如果用多個emb一起訓練，第一個會損毀
+建議放一個不用的emb當第一個
+另外如果emb名字中間有空格(uzumaki himawari)，後面有,也會出問題
+)
+
+工具 emb.py  
+會自動尋找有_的目錄使用 目錄名,當emb名
+並且提供指令及創建pivotal tuning當作第一個emb
+https://github.com/gesen2egee/kohya_ss/blob/master/emb.py
+
+練完會自動bundle好emb 
+到webui 1.7以上可以用
+
+
+
+
+
+
+
+以下原文
+
+
+=====================
+
 # Kohya's GUI
 
 This repository mostly provides a Windows-focused Gradio GUI for [Kohya's Stable Diffusion trainers](https://github.com/kohya-ss/sd-scripts)... but support for Linux OS is also provided through community contributions. Macos is not great at the moment.

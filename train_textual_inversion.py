@@ -27,10 +27,12 @@ from library.config_util import (
 import library.custom_train_functions as custom_train_functions
 from library.custom_train_functions import (
     apply_snr_weight,
+    apply_soft_snr_weight,
     prepare_scheduler_for_custom_training,
     scale_v_prediction_loss_like_noise_prediction,
     add_v_prediction_like_loss,
     apply_debiased_estimation,
+    get_latent_masks
 )
 
 imagenet_templates_small = [
@@ -115,9 +117,9 @@ class TextualInversionTrainer:
         noise_pred = unet(noisy_latents, timesteps, text_conds).sample
         return noise_pred
 
-    def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, prompt_replacement):
+    def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, prompt_replacements):
         train_util.sample_images(
-            accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, prompt_replacement
+            accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, prompt_replacements
         )
 
     def save_weights(self, file, updated_embs, save_dtype, metadata):
@@ -315,6 +317,7 @@ class TextualInversionTrainer:
         collator = train_util.collator_class(current_epoch, current_step, ds_for_collator)
 
         # make captions: tokenstring tokenstring1 tokenstring2 ...tokenstringn という文字列に書き換える超乱暴な実装
+        prompt_replacements = []
         if use_template:
             accelerator.print(f"use template for training captions. is object: {args.use_object_template}")
             templates = imagenet_templates_small if args.use_object_template else imagenet_style_templates_small
@@ -327,16 +330,14 @@ class TextualInversionTrainer:
             # サンプル生成用
             if args.num_vectors_per_token > 1:
                 prompt_replacement = (args.token_string, replace_to)
-            else:
-                prompt_replacement = None
+                prompt_replacements.append(prompt_replacement)
         else:
             # サンプル生成用
             if args.num_vectors_per_token > 1:
                 replace_to = " ".join(token_strings)
                 train_dataset_group.add_replacement(args.token_string, replace_to)
                 prompt_replacement = (args.token_string, replace_to)
-            else:
-                prompt_replacement = None
+                prompt_replacements.append(prompt_replacement)
 
         if args.debug_dataset:
             train_util.debug_dataset(train_dataset_group, show_input_ids=True)
@@ -425,10 +426,13 @@ class TextualInversionTrainer:
             raise NotImplementedError()
 
         index_no_updates_list = []
+        index_updates_list = []
         orig_embeds_params_list = []
         for tokenizer, token_ids, text_encoder in zip(tokenizers, token_ids_list, text_encoders):
             index_no_updates = torch.arange(len(tokenizer)) < token_ids[0]
             index_no_updates_list.append(index_no_updates)
+            index_updates = ~index_no_updates
+            index_updates_list.append(index_updates)
 
             # accelerator.print(len(index_no_updates), torch.sum(index_no_updates))
             orig_embeds_params = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight.data.detach().clone()
@@ -582,6 +586,11 @@ class TextualInversionTrainer:
                     else:
                         target = noise
 
+                    if args.masked_loss and batch['masks'] is not None:
+                        mask = get_latent_masks(batch['masks'], noise_pred.shape, noise_pred.device)
+                        noise_pred = noise_pred * mask
+                        target = target * mask
+
                     loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
                     loss = loss.mean([1, 2, 3])
 
@@ -590,6 +599,8 @@ class TextualInversionTrainer:
 
                     if args.min_snr_gamma:
                         loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
+                    if args.soft_min_snr_gamma:
+                        loss = apply_soft_snr_weight(loss, timesteps, noise_scheduler, args.soft_min_snr_gamma, args.v_parameterization)
                     if args.scale_v_pred_loss_like_noise_pred:
                         loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
                     if args.v_pred_like_loss:
@@ -608,8 +619,31 @@ class TextualInversionTrainer:
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
-                    # Let's make sure we don't update any embedding weights besides the newly added token
                     with torch.no_grad():
+                        # normalize embeddings
+                        if args.clip_ti_decay:
+                            for text_encoder, index_updates in zip(
+                                text_encoders, index_updates_list
+                            ):
+                                pre_norm = (
+                                    text_encoder.get_input_embeddings()
+                                    .weight[index_updates, :]
+                                    .norm(dim=-1, keepdim=True)
+                                )
+
+                                lambda_ = min(1.0, 100 * lr_scheduler.get_last_lr()[0])
+                                text_encoder.get_input_embeddings().weight[
+                                    index_updates
+                                ] = torch.nn.functional.normalize(
+                                    text_encoder.get_input_embeddings().weight[
+                                        index_updates, :
+                                    ],
+                                    dim=-1,
+                                ) * (
+                                    pre_norm + lambda_ * (args.clip_ti_decay - pre_norm)
+                                )
+
+                        # Let's make sure we don't update any embedding weights besides the newly added token
                         for text_encoder, orig_embeds_params, index_no_updates in zip(
                             text_encoders, orig_embeds_params_list, index_no_updates_list
                         ):
@@ -634,7 +668,7 @@ class TextualInversionTrainer:
                         tokenizer_or_list,
                         text_encoder_or_list,
                         unet,
-                        prompt_replacement,
+                        prompt_replacements,
                     )
 
                     # 指定ステップごとにモデルを保存
@@ -717,7 +751,7 @@ class TextualInversionTrainer:
                 tokenizer_or_list,
                 text_encoder_or_list,
                 unet,
-                prompt_replacement,
+                prompt_replacements,
             )
 
             # end of epoch
@@ -782,6 +816,12 @@ def setup_parser() -> argparse.ArgumentParser:
         "--no_half_vae",
         action="store_true",
         help="do not use fp16/bf16 VAE in mixed precision (use float VAE) / mixed precisionでも fp16/bf16 VAEを使わずfloat VAEを使う",
+    )
+    parser.add_argument(
+        "--clip_ti_decay",
+        type=float,
+        default=None,
+        help="Keep the norm of the textual inversion intact (0.4 is a good starting point)",
     )
 
     return parser

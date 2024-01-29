@@ -18,6 +18,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    Callable,
 )
 from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs
 import gc
@@ -145,6 +146,9 @@ class ImageInfo:
         self.text_encoder_outputs1: Optional[torch.Tensor] = None
         self.text_encoder_outputs2: Optional[torch.Tensor] = None
         self.text_encoder_pool2: Optional[torch.Tensor] = None
+        # Masked Loss
+        self.mask: np.ndarray = None
+        self.mask_flipped: np.ndarray = None
 
 
 class BucketManager:
@@ -1015,6 +1019,10 @@ class BaseDataset(torch.utils.data.Dataset):
             )
 
     def get_image_size(self, image_path):
+        npz_path = os.path.splitext(image_path)[0] + ".npz"
+        if self.is_latent_cacheable and os.path.exists(npz_path):
+            _, size, _, _ = load_latents_from_disk(npz_path)
+            return size
         image = Image.open(image_path)
         return image.size
 
@@ -1097,6 +1105,7 @@ class BaseDataset(torch.utils.data.Dataset):
         input_ids2_list = []
         latents_list = []
         images = []
+        masks = []
         original_sizes_hw = []
         crop_top_lefts = []
         target_sizes_hw = []
@@ -1120,14 +1129,18 @@ class BaseDataset(torch.utils.data.Dataset):
                 crop_ltrb = image_info.latents_crop_ltrb  # calc values later if flipped
                 if not flipped:
                     latents = image_info.latents
+                    mask = image_info.mask
                 else:
                     latents = image_info.latents_flipped
+                    mask = image_info.mask_flipped
 
                 image = None
             elif image_info.latents_npz is not None:  # FineTuningDatasetまたはcache_latents_to_disk=Trueの場合
                 latents, original_size, crop_ltrb, flipped_latents = load_latents_from_disk(image_info.latents_npz)
+                mask = load_mask(image_info.absolute_path, image_info.resized_size) / 255
                 if flipped:
                     latents = flipped_latents
+                    mask = np.flip(mask, axis=1)
                     del flipped_latents
                 latents = torch.FloatTensor(latents)
 
@@ -1171,11 +1184,16 @@ class BaseDataset(torch.utils.data.Dataset):
                 if flipped:
                     img = img[:, ::-1, :].copy()  # copy to avoid negative stride problem
 
+                # loss mask is alpha channel, separate it
+                mask = img[:, :, -1] / 255
+                img = img[:, :, :3]
+
                 latents = None
                 image = self.image_transforms(img)  # -1.0~1.0のtorch.Tensorになる
 
             images.append(image)
             latents_list.append(latents)
+            masks.append(torch.tensor(mask))
 
             target_size = (image.shape[2], image.shape[1]) if image is not None else (latents.shape[2] * 8, latents.shape[1] * 8)
 
@@ -1267,7 +1285,7 @@ class BaseDataset(torch.utils.data.Dataset):
         else:
             images = None
         example["images"] = images
-
+        example["masks"] = torch.stack(masks) if masks[0] is not None else None
         example["latents"] = torch.stack(latents_list) if latents_list[0] is not None else None
         example["captions"] = captions
 
@@ -1416,15 +1434,23 @@ class DreamBoothDataset(BaseDataset):
                 print(f"not directory: {subset.image_dir}")
                 return [], []
 
-            img_paths = glob_images(subset.image_dir, "*")
+            img_paths = glob_images(subset.image_dir, "*", self.is_latent_cacheable)
             print(f"found directory {subset.image_dir} contains {len(img_paths)} image files")
 
             # 画像ファイルごとにプロンプトを読み込み、もしあればそちらを使う
             captions = []
             missing_captions = []
+            cached_captions = []
             for img_path in img_paths:
                 cap_for_img = read_caption(img_path, subset.caption_extension)
                 if cap_for_img is None and subset.class_tokens is None:
+                    if self.is_text_encoder_output_cacheable:
+                        cache_file = os.path.splitext(img_path)[0] + TEXT_ENCODER_OUTPUTS_CACHE_SUFFIX
+                        if os.path.exists(cache_file):
+                            captions.append("")
+                            cached_captions.append(cache_file)
+                        continue
+
                     print(
                         f"neither caption file nor class tokens are found. use empty caption for {img_path} / キャプションファイルもclass tokenも見つかりませんでした。空のキャプションを使用します: {img_path}"
                     )
@@ -1439,19 +1465,26 @@ class DreamBoothDataset(BaseDataset):
 
             self.set_tag_frequency(os.path.basename(subset.image_dir), captions)  # タグ頻度を記録
 
-            if missing_captions:
-                number_of_missing_captions = len(missing_captions)
-                number_of_missing_captions_to_show = 5
-                remaining_missing_captions = number_of_missing_captions - number_of_missing_captions_to_show
+            def show_caption_warning(captions_with_warnings, warning_message):
+                if not captions_with_warnings:
+                    return
+                
+                number_of_warning_captions = len(captions_with_warnings)
+                number_of_warning_captions_to_show = 5
+                remaining_warning_captions = number_of_warning_captions - number_of_warning_captions_to_show
 
-                print(
-                    f"No caption file found for {number_of_missing_captions} images. Training will continue without captions for these images. If class token exists, it will be used. / {number_of_missing_captions}枚の画像にキャプションファイルが見つかりませんでした。これらの画像についてはキャプションなしで学習を続行します。class tokenが存在する場合はそれを使います。"
-                )
-                for i, missing_caption in enumerate(missing_captions):
-                    if i >= number_of_missing_captions_to_show:
-                        print(missing_caption + f"... and {remaining_missing_captions} more")
+                print(warning_message.format(number_of_warning_captions=number_of_warning_captions))
+                for i, warning_caption in enumerate(captions_with_warnings):
+                    if i >= number_of_warning_captions_to_show:
+                        print(warning_caption + f"... and {remaining_warning_captions} more")
                         break
-                    print(missing_caption)
+                    print(warning_caption)
+
+            show_caption_warning(missing_captions, 
+                                 "No caption file found for {number_of_warning_captions} images. Training will continue without captions for these images. If class token exists, it will be used. / {number_of_warning_captions}枚の画像にキャプションファイルが見つかりませんでした。これらの画像についてはキャプションなしで学習を続行します。class tokenが存在する場合はそれを使います。")
+            
+            show_caption_warning(cached_captions,
+                                 "No caption file found for {number_of_warning_captions} images. Cached TE embeddings are available for this caption, which will be used instead.")
             return img_paths, captions
 
         print("prepare images.")
@@ -1816,7 +1849,7 @@ class ControlNetDataset(BaseDataset):
 
         extra_imgs = []
         for subset in subsets:
-            conditioning_img_paths = glob_images(subset.conditioning_data_dir, "*")
+            conditioning_img_paths = glob_images(subset.conditioning_data_dir, "*", self.is_latent_cacheable)
             extra_imgs.extend(
                 [cond_img_path for cond_img_path in conditioning_img_paths if cond_img_path not in cond_imgs_with_img]
             )
@@ -2090,8 +2123,7 @@ def debug_dataset(train_dataset, show_input_ids=False):
 
         epoch += 1
 
-
-def glob_images(directory, base="*"):
+def glob_images(directory, base="*", fallback_to_cache=False):
     img_paths = []
     for ext in IMAGE_EXTENSIONS:
         if base == "*":
@@ -2099,6 +2131,15 @@ def glob_images(directory, base="*"):
         else:
             img_paths.extend(glob.glob(glob.escape(os.path.join(directory, base + ext))))
     img_paths = list(set(img_paths))  # 重複を排除
+
+    if fallback_to_cache and len(img_paths) == 0:
+        print(f"No images found in {directory}. Will look for cached latents instead.")
+        if base == "*":
+            img_paths.extend(glob.glob(os.path.join(glob.escape(directory), base + ".npz")))
+        else:
+            img_paths.extend(glob.glob(glob.escape(os.path.join(directory, base + ".npz"))))
+        
+        img_paths = [img_path for img_path in set(img_paths) if not img_path.endswith(TEXT_ENCODER_OUTPUTS_CACHE_SUFFIX)]
     img_paths.sort()
     return img_paths
 
@@ -2191,10 +2232,42 @@ def load_arbitrary_dataset(args, tokenizer) -> MinimalDataset:
 
 def load_image(image_path):
     image = Image.open(image_path)
-    if not image.mode == "RGB":
-        image = image.convert("RGB")
+    if not image.mode == "RGBA":
+        image = image.convert("RGBA")
     img = np.array(image, np.uint8)
+    img[..., -1] = load_mask(image_path, img.shape[:2])
     return img
+
+
+def load_mask(image_path, target_shape):
+    p = pathlib.Path(image_path)
+    mask_path = os.path.join(p.parent, 'mask', p.stem + '.png')
+    result = None
+
+    if os.path.exists(mask_path):
+        try:
+            mask_img = Image.open(mask_path)
+            mask = np.array(mask_img)
+            if len(mask.shape) > 2 and mask.max() <= 255:
+                result = np.array(mask_img.convert("L"))
+            elif len(mask.shape) == 2 and mask.max() > 255:
+                result = mask // (((2 ** 16) - 1) // 255)
+            elif len(mask.shape) == 2 and mask.max() <= 255:
+                result = mask
+            else:
+                print(f"{mask_path} has invalid mask format: using default mask")
+        except:
+            print(f"failed to load mask: {mask_path}")
+
+    # use default when mask file is unavailable
+    if result is None:
+        result = np.full(target_shape, 255, np.uint8)
+
+    # stretch mask to image shape
+    if result.shape != target_shape:
+        result = cv2.resize(result, dsize=target_shape, interpolation=cv2.INTER_LINEAR)
+
+    return result
 
 
 # 画像を読み込む。戻り値はnumpy.ndarray,(original width, original height),(crop left, crop top, crop right, crop bottom)
@@ -2243,12 +2316,17 @@ def cache_batch_latents(
     latents_original_size and latents_crop_ltrb are also set
     """
     images = []
+    masks = []
     for info in image_infos:
         image = load_image(info.absolute_path) if info.image is None else np.array(info.image, np.uint8)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
         image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, image, info.bucket_reso, info.resized_size)
+        # alpha channel contains loss mask, separate it
+        mask = image[:, :, -1] / 255
+        image = image[:, :, :3]
         image = IMAGE_TRANSFORMS(image)
         images.append(image)
+        masks.append(mask)
 
         info.latents_original_size = original_size
         info.latents_crop_ltrb = crop_ltrb
@@ -2266,7 +2344,7 @@ def cache_batch_latents(
     else:
         flipped_latents = [None] * len(latents)
 
-    for info, latent, flipped_latent in zip(image_infos, latents, flipped_latents):
+    for info, latent, flipped_latent, mask in zip(image_infos, latents, flipped_latents, masks):
         # check NaN
         if torch.isnan(latents).any() or (flipped_latent is not None and torch.isnan(flipped_latent).any()):
             raise RuntimeError(f"NaN detected in latents: {info.absolute_path}")
@@ -2275,8 +2353,10 @@ def cache_batch_latents(
             save_latents_to_disk(info.latents_npz, latent, info.latents_original_size, info.latents_crop_ltrb, flipped_latent)
         else:
             info.latents = latent
+            info.mask = mask
             if flip_aug:
                 info.latents_flipped = flipped_latent
+                info.mask_flipped = mask.flip(mask, dims=[3])
 
     # FIXME this slows down caching a lot, specify this as an option
     if torch.cuda.is_available():
@@ -2740,7 +2820,7 @@ def add_optimizer_arguments(parser: argparse.ArgumentParser):
         "--lr_scheduler",
         type=str,
         default="constant",
-        help="scheduler to use for learning rate / 学習率のスケジューラ: linear, cosine, cosine_with_restarts, polynomial, constant (default), constant_with_warmup, adafactor",
+        help="scheduler to use for learning rate / 学習率のスケジューラ: linear, cosine, cosine_with_restarts, polynomial, constant (default), constant_with_warmup, adafactor, rex",
     )
     parser.add_argument(
         "--lr_warmup_steps",
@@ -3260,6 +3340,10 @@ def add_dataset_arguments(
     )
 
     parser.add_argument(
+        "--masked_loss", action="store_true", help="Enable masking of latent loss using grayscale mask images"
+    )
+
+    parser.add_argument(
         "--token_warmup_min",
         type=int,
         default=1,
@@ -3494,6 +3578,7 @@ def get_optimizer(args, trainable_params):
     # print("optkwargs:", optimizer_kwargs)
 
     lr = args.learning_rate
+
     optimizer = None
 
     if optimizer_type == "Lion".lower():
@@ -3730,17 +3815,42 @@ def get_optimizer(args, trainable_params):
     return optimizer_name, optimizer_args, optimizer
 
 
+def lr_lambda_warmup(warmup_steps: int, lr_lambda: Callable[[int], float]):
+    def warmup(current_step: int):
+        if current_step < warmup_steps:
+            return float(current_step) / float(warmup_steps)
+        else:
+            return lr_lambda(current_step - warmup_steps)
+    return warmup
+
+def lr_lambda_rex(
+        scheduler_steps: int,
+):
+    def lr_lambda(current_step: int):
+        # https://arxiv.org/abs/2107.04197
+        max_lr = 1
+        min_lr = 0.001
+        d = 0.9
+
+        if current_step < scheduler_steps:
+            progress = (current_step / scheduler_steps)
+            div = (1 - d) + (d * (1 - progress))
+            return min_lr + (max_lr - min_lr) * ((1 - progress) / div)
+        else:
+            return min_lr
+    return lr_lambda
+
 # Modified version of get_scheduler() function from diffusers.optimizer.get_scheduler
 # Add some checking and features to the original function.
 
 
-def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
+def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int, max_train_steps = None):
     """
     Unified API to get any scheduler from its name.
     """
     name = args.lr_scheduler
     num_warmup_steps: Optional[int] = args.lr_warmup_steps
-    num_training_steps = args.max_train_steps * num_processes  # * args.gradient_accumulation_steps
+    num_training_steps = args.max_train_steps * num_processes if max_train_steps is None else max_train_steps  # * args.gradient_accumulation_steps
     num_cycles = args.lr_scheduler_num_cycles
     power = args.lr_scheduler_power
 
@@ -3777,6 +3887,16 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
         initial_lr = float(name.split(":")[1])
         # print("adafactor scheduler init lr", initial_lr)
         return wrap_check_needless_num_warmup_steps(transformers.optimization.AdafactorSchedule(optimizer, initial_lr))
+
+    if name.upper() == "REX":
+        scheduler_steps = num_training_steps - num_warmup_steps
+        lr_lambda = lr_lambda_rex(scheduler_steps, **lr_scheduler_kwargs)
+        if num_warmup_steps > 0:
+            lr_lambda = lr_lambda_warmup(num_warmup_steps, lr_lambda)
+        return torch.optim.lr_scheduler.LambdaLR(
+                optimizer=optimizer,
+                lr_lambda=lr_lambda,
+        )
 
     name = SchedulerType(name)
     schedule_func = TYPE_TO_SCHEDULER_FUNCTION[name]
@@ -4183,18 +4303,18 @@ def default_if_none(value, default):
     return default if value is None else value
 
 
-def get_epoch_ckpt_name(args: argparse.Namespace, ext: str, epoch_no: int):
-    model_name = default_if_none(args.output_name, DEFAULT_EPOCH_NAME)
+def get_epoch_ckpt_name(args: argparse.Namespace, ext: str, epoch_no: int, custom_name = None):
+    model_name = default_if_none(args.output_name, DEFAULT_EPOCH_NAME) if custom_name is None else custom_name
     return EPOCH_FILE_NAME.format(model_name, epoch_no) + ext
 
 
-def get_step_ckpt_name(args: argparse.Namespace, ext: str, step_no: int):
-    model_name = default_if_none(args.output_name, DEFAULT_STEP_NAME)
+def get_step_ckpt_name(args: argparse.Namespace, ext: str, step_no: int, custom_name = None):
+    model_name = default_if_none(args.output_name, DEFAULT_STEP_NAME) if custom_name is None else custom_name
     return STEP_FILE_NAME.format(model_name, step_no) + ext
 
 
-def get_last_ckpt_name(args: argparse.Namespace, ext: str):
-    model_name = default_if_none(args.output_name, DEFAULT_LAST_OUTPUT_NAME)
+def get_last_ckpt_name(args: argparse.Namespace, ext: str, custom_name = None):
+    model_name = default_if_none(args.output_name, DEFAULT_LAST_OUTPUT_NAME) if custom_name is None else custom_name
     return model_name + ext
 
 
@@ -4648,7 +4768,7 @@ def sample_images_common(
     tokenizer,
     text_encoder,
     unet,
-    prompt_replacement=None,
+    prompt_replacements=[],
     controlnet=None,
 ):
     """
@@ -4759,10 +4879,11 @@ def sample_images_common(
                 schedulers[sampler_name] = scheduler
             pipeline.scheduler = scheduler
 
-            if prompt_replacement is not None:
-                prompt = prompt.replace(prompt_replacement[0], prompt_replacement[1])
-                if negative_prompt is not None:
-                    negative_prompt = negative_prompt.replace(prompt_replacement[0], prompt_replacement[1])
+            if len(prompt_replacements) > 0:
+                for to_replace, replaced_by  in prompt_replacements:
+                    prompt = prompt.replace(to_replace, replaced_by)
+                    if negative_prompt is not None:
+                        negative_prompt = negative_prompt.replace(to_replace, replaced_by)
 
             if controlnet_image is not None:
                 controlnet_image = Image.open(controlnet_image).convert("RGB")
