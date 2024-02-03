@@ -34,7 +34,10 @@ from library.custom_train_functions import (
     apply_debiased_estimation,
     get_latent_masks
 )
-
+from library.train_util import (
+    EMA,
+    check_and_update_ema,
+)
 
 def train(args):
     train_util.verify_training_args(args)
@@ -242,6 +245,10 @@ def train(args):
         unet.to(weight_dtype)
         text_encoder.to(weight_dtype)
 
+    if args.enable_ema:      # u-net only
+        raise NotImplementedError
+        emas = train_util.setup_emas(args, unet)
+
     # acceleratorがなんかよろしくやってくれるらしい
     if args.train_text_encoder:
         unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -381,6 +388,7 @@ def train(args):
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
