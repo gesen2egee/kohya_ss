@@ -15,8 +15,6 @@ import re
 
 RE_UPDOWN = re.compile(r"(up|down)_blocks_(\d+)_(resnets|upsamplers|downsamplers|attentions)_(\d+)_")
 
-RE_UPDOWN = re.compile(r"(up|down)_blocks_(\d+)_(resnets|upsamplers|downsamplers|attentions)_(\d+)_")
-
 
 class LoRAModule(torch.nn.Module):
     """
@@ -935,6 +933,7 @@ class LoRANetwork(torch.nn.Module):
             weights_sd = load_file(file)
         else:
             weights_sd = torch.load(file, map_location="cpu")
+
         info = self.load_state_dict(weights_sd, False)
         return info
 

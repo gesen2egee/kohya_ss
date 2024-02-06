@@ -68,6 +68,10 @@ import library.sai_model_spec as sai_model_spec
 # from library.attention_processors import FlashAttnProcessor
 # from library.hypernetwork import replace_attentions_for_hypernetwork
 from library.original_unet import UNet2DConditionModel
+from copy import deepcopy
+from functools import partial
+from beartype import beartype
+from beartype.typing import Set, Optional
 
 # Tokenizer: checkpointから読み込むのではなくあらかじめ提供されているものを使う
 TOKENIZER_PATH = "openai/clip-vit-large-patch14"
@@ -89,6 +93,59 @@ STEP_DIFFUSERS_DIR_NAME = "{}-step{:08d}"
 # region dataset
 
 IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".PNG", ".JPG", ".JPEG", ".WEBP", ".BMP"]
+
+imagenet_templates_small = [
+    "a photo of a ",
+    "a rendering of a ",
+    "a cropped photo of the ",
+    "the photo of a ",
+    "a photo of a clean ",
+    "a photo of a dirty ",
+    "a dark photo of the ",
+    "a photo of my ",
+    "a photo of the cool ",
+    "a close-up photo of a ",
+    "a bright photo of the ",
+    "a cropped photo of a ",
+    "a photo of the ",
+    "a good photo of the ",
+    "a photo of one ",
+    "a close-up photo of the ",
+    "a rendition of the ",
+    "a photo of the clean ",
+    "a rendition of a ",
+    "a photo of a nice ",
+    "a good photo of a ",
+    "a photo of the nice ",
+    "a photo of the small ",
+    "a photo of the weird ",
+    "a photo of the large ",
+    "a photo of a cool ",
+    "a photo of a small ",
+]
+
+imagenet_style_templates_small = [
+    "a painting in the style of ",
+    "a rendering in the style of ",
+    "a cropped painting in the style of ",
+    "the painting in the style of ",
+    "a clean painting in the style of ",
+    "a dirty painting in the style of ",
+    "a dark painting in the style of ",
+    "a picture in the style of ",
+    "a cool painting in the style of ",
+    "a close-up painting in the style of ",
+    "a bright painting in the style of ",
+    "a cropped painting in the style of ",
+    "a good painting in the style of ",
+    "a close-up painting in the style of ",
+    "a rendition in the style of ",
+    "a nice painting in the style of ",
+    "a small painting in the style of ",
+    "a weird painting in the style of ",
+    "a large painting in the style of ",
+]
+
 
 try:
     import pillow_avif
@@ -352,6 +409,8 @@ class BaseSubset:
         caption_separator: str,
         keep_tokens: int,
         keep_tokens_separator: str,
+        use_object_template: bool,
+        use_style_template: bool, 
         color_aug: bool,
         flip_aug: bool,
         face_crop_aug_range: Optional[Tuple[float, float]],
@@ -370,6 +429,8 @@ class BaseSubset:
         self.caption_separator = caption_separator
         self.keep_tokens = keep_tokens
         self.keep_tokens_separator = keep_tokens_separator
+        self.use_object_template = use_object_template
+        self.use_style_template = use_style_template 
         self.color_aug = color_aug
         self.flip_aug = flip_aug
         self.face_crop_aug_range = face_crop_aug_range
@@ -398,6 +459,8 @@ class DreamBoothSubset(BaseSubset):
         caption_separator: str,
         keep_tokens,
         keep_tokens_separator,
+        use_object_template,
+        use_style_template,
         color_aug,
         flip_aug,
         face_crop_aug_range,
@@ -419,6 +482,8 @@ class DreamBoothSubset(BaseSubset):
             caption_separator,
             keep_tokens,
             keep_tokens_separator,
+            use_object_template,
+            use_style_template,
             color_aug,
             flip_aug,
             face_crop_aug_range,
@@ -454,6 +519,8 @@ class FineTuningSubset(BaseSubset):
         caption_separator,
         keep_tokens,
         keep_tokens_separator,
+        use_object_template,
+        use_style_template,
         color_aug,
         flip_aug,
         face_crop_aug_range,
@@ -475,6 +542,8 @@ class FineTuningSubset(BaseSubset):
             caption_separator,
             keep_tokens,
             keep_tokens_separator,
+            use_object_template,
+            use_style_template,
             color_aug,
             flip_aug,
             face_crop_aug_range,
@@ -507,6 +576,8 @@ class ControlNetSubset(BaseSubset):
         caption_separator,
         keep_tokens,
         keep_tokens_separator,
+        use_object_template,
+        use_style_template,
         color_aug,
         flip_aug,
         face_crop_aug_range,
@@ -528,6 +599,8 @@ class ControlNetSubset(BaseSubset):
             caption_separator,
             keep_tokens,
             keep_tokens_separator,
+            use_object_template,
+            use_style_template,
             color_aug,
             flip_aug,
             face_crop_aug_range,
@@ -651,7 +724,6 @@ class BaseDataset(torch.utils.data.Dataset):
             caption = subset.caption_prefix + " " + caption
         if subset.caption_suffix:
             caption = caption + " " + subset.caption_suffix
-
         # dropoutの決定：tag dropがこのメソッド内にあるのでここで行うのが良い
         is_drop_out = subset.caption_dropout_rate > 0 and random.random() < subset.caption_dropout_rate
         is_drop_out = (
@@ -680,7 +752,10 @@ class BaseDataset(torch.utils.data.Dataset):
                     if subset.keep_tokens > 0:
                         fixed_tokens = flex_tokens[: subset.keep_tokens]
                         flex_tokens = tokens[subset.keep_tokens :]
-
+                if subset.use_object_template or subset.use_style_template:
+                    imagenet_templates = imagenet_templates_small if subset.use_object_template else imagenet_style_templates_small
+                    imagenet_template = [random.choice(imagenet_templates)]
+                    caption = imagenet_template + fixed_tokens  
                 if subset.token_warmup_step < 1:  # 初回に上書きする
                     subset.token_warmup_step = math.floor(subset.token_warmup_step * self.max_train_steps)
                 if subset.token_warmup_step and self.current_step < subset.token_warmup_step:
@@ -1015,6 +1090,10 @@ class BaseDataset(torch.utils.data.Dataset):
             )
 
     def get_image_size(self, image_path):
+        npz_path = os.path.splitext(image_path)[0] + ".npz"
+        if self.is_latent_cacheable and os.path.exists(npz_path):
+            _, size, _, _ = load_latents_from_disk(npz_path)
+            return size
         image = Image.open(image_path)
         return image.size
 
@@ -1416,15 +1495,23 @@ class DreamBoothDataset(BaseDataset):
                 print(f"not directory: {subset.image_dir}")
                 return [], []
 
-            img_paths = glob_images(subset.image_dir, "*")
+            img_paths = glob_images(subset.image_dir, "*", self.is_latent_cacheable)
             print(f"found directory {subset.image_dir} contains {len(img_paths)} image files")
 
             # 画像ファイルごとにプロンプトを読み込み、もしあればそちらを使う
             captions = []
             missing_captions = []
+            cached_captions = []
             for img_path in img_paths:
                 cap_for_img = read_caption(img_path, subset.caption_extension)
                 if cap_for_img is None and subset.class_tokens is None:
+                    if self.is_text_encoder_output_cacheable:
+                        cache_file = os.path.splitext(img_path)[0] + TEXT_ENCODER_OUTPUTS_CACHE_SUFFIX
+                        if os.path.exists(cache_file):
+                            captions.append("")
+                            cached_captions.append(cache_file)
+                        continue
+
                     print(
                         f"neither caption file nor class tokens are found. use empty caption for {img_path} / キャプションファイルもclass tokenも見つかりませんでした。空のキャプションを使用します: {img_path}"
                     )
@@ -1439,19 +1526,26 @@ class DreamBoothDataset(BaseDataset):
 
             self.set_tag_frequency(os.path.basename(subset.image_dir), captions)  # タグ頻度を記録
 
-            if missing_captions:
-                number_of_missing_captions = len(missing_captions)
-                number_of_missing_captions_to_show = 5
-                remaining_missing_captions = number_of_missing_captions - number_of_missing_captions_to_show
+            def show_caption_warning(captions_with_warnings, warning_message):
+                if not captions_with_warnings:
+                    return
+                
+                number_of_warning_captions = len(captions_with_warnings)
+                number_of_warning_captions_to_show = 5
+                remaining_warning_captions = number_of_warning_captions - number_of_warning_captions_to_show
 
-                print(
-                    f"No caption file found for {number_of_missing_captions} images. Training will continue without captions for these images. If class token exists, it will be used. / {number_of_missing_captions}枚の画像にキャプションファイルが見つかりませんでした。これらの画像についてはキャプションなしで学習を続行します。class tokenが存在する場合はそれを使います。"
-                )
-                for i, missing_caption in enumerate(missing_captions):
-                    if i >= number_of_missing_captions_to_show:
-                        print(missing_caption + f"... and {remaining_missing_captions} more")
+                print(warning_message.format(number_of_warning_captions=number_of_warning_captions))
+                for i, warning_caption in enumerate(captions_with_warnings):
+                    if i >= number_of_warning_captions_to_show:
+                        print(warning_caption + f"... and {remaining_warning_captions} more")
                         break
-                    print(missing_caption)
+                    print(warning_caption)
+
+            show_caption_warning(missing_captions, 
+                                 "No caption file found for {number_of_warning_captions} images. Training will continue without captions for these images. If class token exists, it will be used. / {number_of_warning_captions}枚の画像にキャプションファイルが見つかりませんでした。これらの画像についてはキャプションなしで学習を続行します。class tokenが存在する場合はそれを使います。")
+            
+            show_caption_warning(cached_captions,
+                                 "No caption file found for {number_of_warning_captions} images. Cached TE embeddings are available for this caption, which will be used instead.")
             return img_paths, captions
 
         print("prepare images.")
@@ -1754,6 +1848,8 @@ class ControlNetDataset(BaseDataset):
                 subset.caption_separator,
                 subset.keep_tokens,
                 subset.keep_tokens_separator,
+                subset.use_object_template,
+                subset.use_style_template,
                 subset.color_aug,
                 subset.flip_aug,
                 subset.face_crop_aug_range,
@@ -1816,7 +1912,7 @@ class ControlNetDataset(BaseDataset):
 
         extra_imgs = []
         for subset in subsets:
-            conditioning_img_paths = glob_images(subset.conditioning_data_dir, "*")
+            conditioning_img_paths = glob_images(subset.conditioning_data_dir, "*", self.is_latent_cacheable)
             extra_imgs.extend(
                 [cond_img_path for cond_img_path in conditioning_img_paths if cond_img_path not in cond_imgs_with_img]
             )
@@ -2090,8 +2186,7 @@ def debug_dataset(train_dataset, show_input_ids=False):
 
         epoch += 1
 
-
-def glob_images(directory, base="*"):
+def glob_images(directory, base="*", fallback_to_cache=False):
     img_paths = []
     for ext in IMAGE_EXTENSIONS:
         if base == "*":
@@ -2099,6 +2194,15 @@ def glob_images(directory, base="*"):
         else:
             img_paths.extend(glob.glob(glob.escape(os.path.join(directory, base + ext))))
     img_paths = list(set(img_paths))  # 重複を排除
+
+    if fallback_to_cache and len(img_paths) == 0:
+        print(f"No images found in {directory}. Will look for cached latents instead.")
+        if base == "*":
+            img_paths.extend(glob.glob(os.path.join(glob.escape(directory), base + ".npz")))
+        else:
+            img_paths.extend(glob.glob(glob.escape(os.path.join(directory, base + ".npz"))))
+        
+        img_paths = [img_path for img_path in set(img_paths) if not img_path.endswith(TEXT_ENCODER_OUTPUTS_CACHE_SUFFIX)]
     img_paths.sort()
     return img_paths
 
@@ -3086,6 +3190,78 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--output_config", action="store_true", help="output command line args to given .toml file / 引数を.tomlファイルに出力する"
     )
 
+    parser.add_argument(
+        "--enable_ema",
+        action="store_true", 
+        help="Enable EMA "
+    )
+    parser.add_argument(
+        "--ema_type", 
+        type=str,
+        default="post-hoc", 
+        choices=["post-hoc"],  # ["traditional","post-hoc"]
+        help="'traditional' = traditional EMA \
+        'post-hoc' = karras EMA. It saves multiple snaphots and allows to reconstruct different EMA profiles after training ",
+    )
+    #parser.add_argument(
+    #    "--ema_k_sigma_rel_1",
+    #    type=float,
+    #    default=0.05,
+    #    help="Averaging length for karras EMA profile.  0 < sigma_rel < 0.28 ",
+    #)
+    #parser.add_argument(
+    #    "--ema_k_sigma_rel_2",
+    #    type=float,
+    #    default=0.1,
+    #    help="Averaging length for karras EMA profile.  0 < sigma_rel < 0.28 ",
+    #)
+    parser.add_argument(
+        "--ema_k_num_snapshots",
+        type=int,
+        default=8,
+        help="Number of saved snapshots. Only for post-hoc ema ",
+    )
+    parser.add_argument(
+        "--ema_beta",
+        type=float,
+        default=0.9999,
+        help="Max ema decay. Only for traditional EMA ",
+    )
+    parser.add_argument(
+        "--ema_karras_beta",
+        action="store_true", 
+        help="use the karras time dependent beta. Only for traditional EMA "
+    )
+    parser.add_argument(
+        "--ema_warmup_power",
+        type=float,
+        default=2/3,
+        help="Only for traditional EMA. If gamma=1 and power=1, implements a simple average. gamma=1, power=2/3 are \
+        good values for models you plan to train for a million or more steps (reaches decay \
+        factor 0.999 at 31.6K steps, 0.9999 at 1M steps), gamma=1, power=3/4 for models \
+        you plan to train for less (reaches decay factor 0.999 at 10K steps, 0.9999 at \
+        215.4k steps). ",
+    )
+    parser.add_argument(
+        "--ema_update_after_step",
+        type=int,
+        default=0,
+        help="EMA warmup steps. Only for traditional EMA. ",
+    )
+    parser.add_argument(
+        "--ema_update_every",
+        type=int,
+        default=10,
+        help="Update EMA every x steps ",
+    )
+    #parser.add_argument(
+    #    "--ema_device",
+    #    type=str,
+    #    default="cpu", 
+    #    help=" "
+    #)
+
+
     # SAI Model spec
     parser.add_argument(
         "--metadata_title",
@@ -3198,6 +3374,16 @@ def add_dataset_arguments(
         default="",
         help="A custom separator to divide the caption into fixed and flexible parts. Tokens before this separator will not be shuffled. If not specified, '--keep_tokens' will be used to determine the fixed number of tokens."
         + " / captionを固定部分と可変部分に分けるためのカスタム区切り文字。この区切り文字より前のトークンはシャッフルされない。指定しない場合、'--keep_tokens'が固定部分のトークン数として使用される。",
+    )
+    parser.add_argument(
+        "--use_object_template",
+        action="store_true",
+        help="prefix default templates for object for caption text / キャプションは使わずデフォルトの物体用テンプレートで学習する",
+    )
+    parser.add_argument(
+        "--use_style_template",
+        action="store_true",
+        help="prefix default templates for stype for caption text / キャプションは使わずデフォルトのスタイル用テンプレートで学習する",
     )
     parser.add_argument(
         "--caption_prefix",
@@ -4890,3 +5076,289 @@ class LossRecorder:
     @property
     def moving_average(self) -> float:
         return self.loss_total / len(self.loss_list)
+
+
+# region EMA
+
+
+# based on https://arxiv.org/abs/2312.02696 , https://github.com/cloneofsimo/karras-power-ema-tutorial and  https://github.com/lucidrains/ema-pytorch/blob/main/ema_pytorch/ema_pytorch.py  
+
+#ema_gamma1 = 16.97    #  sigma_rel=0.05
+#ema_gamma2 = 6.94     #  sigma_rel=0.1
+
+def sigma_rel_to_gamma(sigma_rel):
+    t = sigma_rel ** -2
+    gamma = np.roots([1, 7, 16 - t, 12 - t]).real.max()
+    return gamma
+
+def exists(val):
+    return val is not None
+
+def get_module_device(m: torch.nn.Module):
+    return next(m.parameters()).device
+
+def inplace_copy(src: torch.Tensor, tgt: torch.Tensor, *, auto_move_device = False):
+    if auto_move_device:
+        tgt = tgt.to(src.device)
+
+    src.copy_(tgt)
+
+def inplace_lerp(src: torch.Tensor, tgt: torch.Tensor, weight, *, auto_move_device = False):
+    if auto_move_device:
+        tgt = tgt.to(src.device)
+
+    src.lerp_(tgt, weight)
+
+def check_and_update_ema(args, ema, checkpoint_index=0, model_type=None):
+    if model_type == "unet":
+        # TODO
+        # check and save
+        pass
+    ema.update()
+
+def setup_emas(args, model):
+    emas = []
+    if args.ema_type == 'post-hoc':
+        snapshot_every = math.ceil(args.max_train_steps / args.ema_k_num_snapshots)
+        ema1 = EMA(model, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 16.97, post_hoc_snapshot_every = snapshot_every)
+        ema2 = EMA(model, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 6.94, post_hoc_snapshot_every = snapshot_every)
+        emas = [ema1, ema2]
+    return emas
+
+
+class EMA(torch.nn.Module):
+    """
+    Implements exponential moving average shadowing for your model.
+
+    Utilizes an inverse decay schedule to manage longer term training runs.
+    By adjusting the power, you can control how fast EMA will ramp up to your specified beta.
+
+    @crowsonkb's notes on EMA Warmup:
+
+    If gamma=1 and power=1, implements a simple average. gamma=1, power=2/3 are
+    good values for models you plan to train for a million or more steps (reaches decay
+    factor 0.999 at 31.6K steps, 0.9999 at 1M steps), gamma=1, power=3/4 for models
+    you plan to train for less (reaches decay factor 0.999 at 10K steps, 0.9999 at
+    215.4k steps).
+
+    Args:
+        inv_gamma (float): Inverse multiplicative factor of EMA warmup. Default: 1.
+        power (float): Exponential factor of EMA warmup. Default: 2/3.
+        min_value (float): The minimum EMA decay rate. Default: 0.
+    """
+
+    @beartype
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        ema_model: Optional[torch.nn.Module] = None,           # if your model has lazylinears or other types of non-deepcopyable modules, you can pass in your own ema model
+        beta = 0.9999,
+        karras_beta = False,                          # if True, uses the karras time dependent beta
+        update_after_step = 100,
+        update_every = 10,
+        inv_gamma = 1.0,
+        power = 2 / 3,
+        min_value = 0.0,
+        param_or_buffer_names_no_ema: Set[str] = set(),
+        ignore_names: Set[str] = set(),
+        ignore_startswith_names: Set[str] = set(),
+        include_online_model = True,                  # set this to False if you do not wish for the online model to be saved along with the ema model (managed externally)
+        allow_different_devices = False,               # if the EMA model is on a different device (say CPU), automatically move the tensor
+        post_hoc = False,
+        post_hoc_gamma = 16.97,
+        post_hoc_snapshot_every = 1000,
+        sigma_rel = None,
+        model_type = None,
+    ):
+        super().__init__()
+        self._beta = beta
+        self.karras_beta = karras_beta
+
+        self.post_hoc = post_hoc
+        self.post_hoc_gamma = post_hoc_gamma
+        self.post_hoc_snapshot_every = post_hoc_snapshot_every
+
+        self.is_frozen = beta == 1.
+
+        # whether to include the online model within the module tree, so that state_dict also saves it
+
+        self.include_online_model = include_online_model
+
+        if include_online_model:
+            self.online_model = model
+        else:
+            self.online_model = [model] # hack
+
+        # ema model
+
+        self.ema_model = ema_model
+
+        if not exists(self.ema_model):
+            try:
+                self.ema_model = deepcopy(model)
+            except Exception as e:
+                print(f'Error: While trying to deepcopy model: {e}')
+                print('Your model was not copyable. Please make sure you are not using any LazyLinear')
+                exit()
+
+        self.ema_model.requires_grad_(False)
+
+        # parameter and buffer names
+
+        self.parameter_names = {name for name, param in self.ema_model.named_parameters() if param.dtype in [torch.float, torch.float16, torch.bfloat16]}
+        self.buffer_names = {name for name, buffer in self.ema_model.named_buffers() if buffer.dtype in [torch.float, torch.float16, torch.bfloat16]}
+
+        # tensor update functions
+
+        self.inplace_copy = partial(inplace_copy, auto_move_device = allow_different_devices)
+        self.inplace_lerp = partial(inplace_lerp, auto_move_device = allow_different_devices)
+
+        # updating hyperparameters
+
+        self.update_every = update_every
+        self.update_after_step = update_after_step
+
+        self.inv_gamma = inv_gamma
+        self.power = power
+        self.min_value = min_value
+
+        assert isinstance(param_or_buffer_names_no_ema, (set, list))
+        self.param_or_buffer_names_no_ema = param_or_buffer_names_no_ema # parameter or buffer
+
+        self.ignore_names = ignore_names
+        self.ignore_startswith_names = ignore_startswith_names
+
+        # whether to manage if EMA model is kept on a different device
+
+        self.allow_different_devices = allow_different_devices
+
+        # init and step states
+
+        self.register_buffer('initted', torch.tensor(False))
+        self.register_buffer('step', torch.tensor(0))
+
+        if sigma_rel:
+            self.post_hoc_gamma = sigma_rel_to_gamma(sigma_rel)
+
+        if post_hoc:
+            self.karras_beta = True
+            self.power = self.post_hoc_gamma
+            self.register_buffer('ema_gamma', torch.tensor(self.post_hoc_gamma))
+
+    @property
+    def model(self):
+        return self.online_model if self.include_online_model else self.online_model[0]
+    
+    @property
+    def beta(self):
+        if self.karras_beta:
+            return (1 - 1 / (self.step + 1)) ** (1 + self.power)
+
+        return self._beta
+
+    def eval(self):
+        return self.ema_model.eval()
+    
+    def restore_ema_model_device(self):
+        device = self.initted.device
+        self.ema_model.to(device)
+
+    def get_params_iter(self, model):
+        for name, param in model.named_parameters():
+            if name not in self.parameter_names:
+                continue
+            yield name, param
+
+    def get_buffers_iter(self, model):
+        for name, buffer in model.named_buffers():
+            if name not in self.buffer_names:
+                continue
+            yield name, buffer
+
+    def copy_params_from_model_to_ema(self):
+        copy = self.inplace_copy
+
+        for (_, ma_params), (_, current_params) in zip(self.get_params_iter(self.ema_model), self.get_params_iter(self.model)):
+            copy(ma_params.data, current_params.data)
+
+        for (_, ma_buffers), (_, current_buffers) in zip(self.get_buffers_iter(self.ema_model), self.get_buffers_iter(self.model)):
+            copy(ma_buffers.data, current_buffers.data)
+
+    def copy_params_from_ema_to_model(self):
+        copy = self.inplace_copy
+
+        for (_, ma_params), (_, current_params) in zip(self.get_params_iter(self.ema_model), self.get_params_iter(self.model)):
+            copy(current_params.data, ma_params.data)
+
+        for (_, ma_buffers), (_, current_buffers) in zip(self.get_buffers_iter(self.ema_model), self.get_buffers_iter(self.model)):
+            copy(current_buffers.data, ma_buffers.data)
+
+    def get_current_decay(self):
+        if self.post_hoc:
+            return self.beta
+
+        epoch = (self.step - self.update_after_step - 1).clamp(min = 0.)
+        value = 1 - (1 + epoch / self.inv_gamma) ** - self.power
+
+        if epoch.item() <= 0:
+            return 0.
+
+        return value.clamp(min = self.min_value, max = self.beta).item()
+
+    def update(self):
+        step = self.step.item()
+
+        self.step += 1
+
+        if (step % self.update_every) != 0:
+            return
+
+        if step <= self.update_after_step:
+            self.copy_params_from_model_to_ema()
+            return
+
+        if not self.initted.item():
+            self.copy_params_from_model_to_ema()
+            self.initted.data.copy_(torch.tensor(True))
+
+        self.update_moving_average(self.ema_model, self.model)
+
+    @torch.no_grad()
+    def update_moving_average(self, ma_model, current_model):
+        if self.is_frozen:
+            return
+
+        copy, lerp = self.inplace_copy, self.inplace_lerp
+        current_decay = self.get_current_decay()
+
+        for (name, current_params), (_, ma_params) in zip(self.get_params_iter(current_model), self.get_params_iter(ma_model)):
+            if name in self.ignore_names:
+                continue
+
+            if any([name.startswith(prefix) for prefix in self.ignore_startswith_names]):
+                continue
+
+            if name in self.param_or_buffer_names_no_ema:
+                copy(ma_params.data, current_params.data)
+                continue
+
+            lerp(ma_params.data, current_params.data, 1. - current_decay)
+
+        for (name, current_buffer), (_, ma_buffer) in zip(self.get_buffers_iter(current_model), self.get_buffers_iter(ma_model)):
+            if name in self.ignore_names:
+                continue
+
+            if any([name.startswith(prefix) for prefix in self.ignore_startswith_names]):
+                continue
+
+            if name in self.param_or_buffer_names_no_ema:
+                copy(ma_buffer.data, current_buffer.data)
+                continue
+
+            lerp(ma_buffer.data, current_buffer.data, 1. - current_decay)
+
+    def __call__(self, *args, **kwargs):
+        return self.ema_model(*args, **kwargs)
+
+
+# endregion
