@@ -1034,8 +1034,7 @@ class NetworkTrainer:
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
-
-                    
+       
                     # Let's make sure we don't update any embedding weights besides the added pivots
                     if args.continue_inversion:
                         with torch.no_grad():
@@ -1052,7 +1051,7 @@ class NetworkTrainer:
                                 emb_token_ids = embedding_to_token_ids[emb_name]
                                 updated_embs = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[emb_token_ids].data.detach().clone()
                                 embeddings_map[emb_name] = updated_embs
-                                
+
                     if args.enable_ema:
                         for i, e in enumerate(emas):
                             if args.ema_type == "post-hoc" and ((e.step + 1) % e.post_hoc_snapshot_every) == 0 and e.step != 0:
@@ -1159,6 +1158,16 @@ class NetworkTrainer:
         if is_main_process:
             ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
             save_model(ckpt_name, network, global_step, num_train_epochs, embeddings_map, force_sync_upload=True)
+
+            if args.enable_ema and args.ema_type == 'traditional':
+                # save directly
+                ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
+                save_model(os.path.splitext(ckpt_name)[0] + "-EMA" + os.path.splitext(ckpt_name)[1], emas[0].ema_model, global_step, num_train_epochs, force_sync_upload=True)
+
+                ## save EMA - copy and save
+                #emas[0].copy_params_from_ema_to_model()
+                #ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
+                #save_model(os.path.splitext(ckpt_name)[0] + "-EMA_" + os.path.splitext(ckpt_name)[1], network, global_step, num_train_epochs, force_sync_upload=True)
 
             if args.enable_ema and args.ema_type == 'traditional':
                 # save directly
