@@ -69,6 +69,7 @@ from library.lpw_stable_diffusion import StableDiffusionLongPromptWeightingPipel
 import library.model_util as model_util
 import library.huggingface_util as huggingface_util
 import library.sai_model_spec as sai_model_spec
+from library import token_merging
 from library.utils import setup_logging
 
 setup_logging()
@@ -3180,6 +3181,20 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         default=None,
         help="set maximum time step for U-Net training (1~1000, default is 1000) / U-Net学習時のtime stepの最大値を設定する（1~1000で指定、省略時はデフォルト値(1000)）",
     )
+    parser.add_argument(
+        "--todo_factor",
+        type=float,
+        help="token downsampling (ToDo) factor > 1 (recommend around 2-4)",
+    )
+    parser.add_argument(
+        "--todo_max_downsample",
+        type=int,
+        choices=[1, 2, 4, 8],
+        help=(
+            "apply ToDo to layers with at most this amount of downsampling."
+            " SDXL only accepts 2 and 4. Recommend 1 or 2. Default 1 (or 2 for SDXL)"
+        ),
+    )
 
     parser.add_argument(
         "--lowram",
@@ -4234,6 +4249,11 @@ def load_target_model(args, weight_dtype, accelerator, unet_use_linear_projectio
 
             clean_memory_on_device(accelerator.device)
         accelerator.wait_for_everyone()
+
+    # apply token merging patch
+    if args.todo_factor:
+        token_merging.patch_attention(unet, args)
+        logger.info(f"enable token downsampling optimization | {unet._tome_info['args']}")
 
     return text_encoder, vae, unet, load_stable_diffusion_format
 
