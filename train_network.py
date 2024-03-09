@@ -24,6 +24,8 @@ from library import model_util
 import library.train_util as train_util
 from library.train_util import (
     DreamBoothDataset,
+    EMA,
+    check_and_update_ema,
 )
 import library.config_util as config_util
 from library.config_util import (
@@ -34,11 +36,13 @@ import library.huggingface_util as huggingface_util
 import library.custom_train_functions as custom_train_functions
 from library.custom_train_functions import (
     apply_snr_weight,
+    apply_soft_snr_weight,
     get_weighted_text_embeddings,
     prepare_scheduler_for_custom_training,
     scale_v_prediction_loss_like_noise_prediction,
     add_v_prediction_like_loss,
     apply_debiased_estimation,
+    get_latent_masks
 )
 from library.utils import setup_logging, add_logging_arguments
 
@@ -136,6 +140,67 @@ class NetworkTrainer:
     def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet):
         train_util.sample_images(accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet)
 
+    def process_val_batch(self, batch, is_train, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args, train_text_encoder=True):
+
+        total_loss = 0.0
+        timesteps_list = [10, 350, 500, 650, 990]    
+        
+        with torch.no_grad():
+            if "latents" in batch and batch["latents"] is not None:
+                latents = batch["latents"].to(accelerator.device)
+            else:
+                # latentに変換
+                latents = vae.encode(batch["images"].to(accelerator.device, dtype=vae_dtype)).latent_dist.sample()
+
+                # NaNが含まれていれば警告を表示し0に置き換える
+                if torch.any(torch.isnan(latents)):
+                    accelerator.print("NaN found in latents, replacing with zeros")
+                    latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
+            latents = latents * self.vae_scale_factor
+        b_size = latents.shape[0]
+
+        with torch.set_grad_enabled(is_train and train_text_encoder), accelerator.autocast():
+            # Get the text embedding for conditioning
+            if args.weighted_captions:
+                text_encoder_conds = get_weighted_text_embeddings(
+                    tokenizers[0],
+                    text_encoders[0],
+                    batch["captions"],
+                    accelerator.device,
+                    args.max_token_length // 75 if args.max_token_length else 1,
+                    clip_skip=args.clip_skip,
+                )
+            else:
+                text_encoder_conds = self.get_text_cond(
+                    args, accelerator, batch, tokenizers, text_encoders, weight_dtype
+                )
+
+        # Sample noise, sample a random timestep for each image, and add noise to the latents,
+        # with noise offset and/or multires noise if specified
+        noise, noisy_latents, _ = train_util.get_noise_noisy_latents_and_timesteps(
+            args, noise_scheduler, latents
+        )
+        for timesteps in timesteps_list:
+            # Predict the noise residual
+            with torch.set_grad_enabled(is_train), accelerator.autocast():
+                noise_pred = self.call_unet(
+                    args, accelerator, unet, noisy_latents, timesteps, text_encoder_conds, batch, weight_dtype
+                )
+
+            if args.v_parameterization:
+                # v-parameterization training
+                target = noise_scheduler.get_velocity(latents, noise, timesteps)
+            else:
+                target = noise
+
+            loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
+            loss = loss.mean([1, 2, 3])
+            loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
+            total_loss += loss
+            
+        average_loss = total_loss / len(timesteps_list)    
+        return average_loss
+
     def train(self, args):
         session_id = random.randint(0, 2**32)
         training_started_at = time.time()
@@ -196,11 +261,12 @@ class NetworkTrainer:
                     }
 
             blueprint = blueprint_generator.generate(user_config, args, tokenizer=tokenizer)
-            train_dataset_group = config_util.generate_dataset_group_by_blueprint(blueprint.dataset_group)
+            train_dataset_group, val_dataset_group = config_util.generate_dataset_group_by_blueprint(blueprint.dataset_group)
         else:
             # use arbitrary dataset class
             train_dataset_group = train_util.load_arbitrary_dataset(args, tokenizer)
-
+            val_dataset_group = None # placeholder until validation dataset supported for arbitrary
+            
         current_epoch = Value("i", 0)
         current_step = Value("i", 0)
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
@@ -219,7 +285,11 @@ class NetworkTrainer:
             assert (
                 train_dataset_group.is_latent_cacheable()
             ), "when caching latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
-
+            if val_dataset_group is not None:
+                assert (
+                    val_dataset_group.is_latent_cacheable()
+                ), "when caching validation latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
+              
         self.assert_extra_args(args, train_dataset_group)
 
         # acceleratorを準備する
@@ -271,6 +341,9 @@ class NetworkTrainer:
             vae.eval()
             with torch.no_grad():
                 train_dataset_group.cache_latents(vae, args.vae_batch_size, args.cache_latents_to_disk, accelerator.is_main_process)
+                if val_dataset_group is not None:
+                    print("Cache validation latents...")
+                    val_dataset_group.cache_latents(vae, args.vae_batch_size, args.cache_latents_to_disk, accelerator.is_main_process)                
             vae.to("cpu")
             clean_memory_on_device(accelerator.device)
 
@@ -360,6 +433,15 @@ class NetworkTrainer:
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
         )
+        
+        val_dataloader = torch.utils.data.DataLoader(
+            val_dataset_group if val_dataset_group is not None else [],
+            shuffle=False,
+            batch_size=1,
+            collate_fn=collator,
+            num_workers=n_workers,
+            persistent_workers=args.persistent_data_loader_workers,
+        )
 
         # 学習ステップ数を計算する
         if args.max_train_epochs is not None:
@@ -425,6 +507,17 @@ class NetworkTrainer:
                 text_encoders = [text_encoder]
         else:
             pass  # if text_encoder is not trained, no need to prepare. and device and dtype are already set
+
+        if args.enable_ema: 
+            if args.ema_type == 'traditional':
+                ema = EMA(network, beta = args.ema_beta, karras_beta = args.ema_karras_beta, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, power = args.ema_warmup_power, include_online_model = False, allow_different_devices = True)
+                #ema.to(accelerator.device)
+                emas = [ema]
+            elif args.ema_type == 'post-hoc':
+                snapshot_every = math.ceil(args.max_train_steps / args.ema_k_num_snapshots)
+                ema1 = EMA(network, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 16.97, post_hoc_snapshot_every = snapshot_every)
+                ema2 = EMA(network, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 6.94, post_hoc_snapshot_every = snapshot_every)
+                emas = [ema1, ema2]
 
         network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
 
@@ -526,9 +619,11 @@ class NetworkTrainer:
             "ss_face_crop_aug_range": args.face_crop_aug_range,
             "ss_prior_loss_weight": args.prior_loss_weight,
             "ss_min_snr_gamma": args.min_snr_gamma,
+            "ss_soft_min_snr_gamma": args.soft_min_snr_gamma,
             "ss_scale_weight_norms": args.scale_weight_norms,
             "ss_ip_noise_gamma": args.ip_noise_gamma,
             "ss_debiased_estimation": bool(args.debiased_estimation_loss),
+            "ss_enable_ema": bool(args.enable_ema),
         }
 
         if use_user_config:
@@ -564,6 +659,11 @@ class NetworkTrainer:
                         "random_crop": bool(subset.random_crop),
                         "shuffle_caption": bool(subset.shuffle_caption),
                         "keep_tokens": subset.keep_tokens,
+                        "keep_tokens_separator": subset.keep_tokens_separator,
+                        "secondary_separator": subset.secondary_separator,
+                        "enable_wildcard": bool(subset.enable_wildcard),
+                        "caption_prefix": subset.caption_prefix,
+                        "caption_suffix": subset.caption_suffix,
                     }
 
                     image_dir_or_metadata_file = None
@@ -707,6 +807,8 @@ class NetworkTrainer:
             )
 
         loss_recorder = train_util.LossRecorder()
+        val_loss_recorder = train_util.LossRecorder()
+        
         del train_dataset_group
 
         # callback for step start
@@ -755,7 +857,8 @@ class NetworkTrainer:
                 current_step.value = global_step
                 with accelerator.accumulate(network):
                     on_step_start(text_encoder, unet)
-
+                    
+                    is_train = True
                     with torch.no_grad():
                         if "latents" in batch and batch["latents"] is not None:
                             latents = batch["latents"].to(accelerator.device)
@@ -780,7 +883,7 @@ class NetworkTrainer:
                         # print(f"set multiplier: {multipliers}")
                         accelerator.unwrap_model(network).set_multiplier(multipliers)
 
-                    with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
+                    with torch.set_grad_enabled(is_train and train_text_encoder), accelerator.autocast():
                         # Get the text embedding for conditioning
                         if args.weighted_captions:
                             text_encoder_conds = get_weighted_text_embeddings(
@@ -810,7 +913,7 @@ class NetworkTrainer:
                             t.requires_grad_(True)
 
                     # Predict the noise residual
-                    with accelerator.autocast():
+                    with torch.set_grad_enabled(is_train), accelerator.autocast():
                         noise_pred = self.call_unet(
                             args,
                             accelerator,
@@ -828,6 +931,11 @@ class NetworkTrainer:
                     else:
                         target = noise
 
+                    if (args.masked_loss or args.mask_simple_background) and batch['masks'] is not None:
+                        mask = get_latent_masks(batch['masks'], noise_pred.shape, noise_pred.device)
+                        noise_pred = noise_pred * mask
+                        target = target * mask
+
                     loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
                     loss = loss.mean([1, 2, 3])
 
@@ -844,7 +952,7 @@ class NetworkTrainer:
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
 
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
-
+                    
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
@@ -855,6 +963,16 @@ class NetworkTrainer:
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
+
+                    if args.enable_ema:
+                        for i, e in enumerate(emas):
+                            if args.ema_type == "post-hoc" and ((e.step + 1) % e.post_hoc_snapshot_every) == 0 and e.step != 0:
+                                #save snapshot
+                                snapshot_dir = os.path.join(args.output_dir, args.output_name + "_ema_snapshots")
+                                os.makedirs(snapshot_dir, exist_ok=True)
+                                snapshot_name = os.path.join(snapshot_dir, "snapshot_{}_{:09d}_{:.6f}".format(i, e.step, e.post_hoc_gamma))
+                                save_model(snapshot_name + ".safetensors", e.ema_model, global_step, num_train_epochs)
+                            check_and_update_ema(args, e, i)
 
                 if args.scale_weight_norms:
                     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
@@ -898,14 +1016,38 @@ class NetworkTrainer:
                 if args.logging_dir is not None:
                     logs = self.generate_step_logs(args, current_loss, avr_loss, lr_scheduler, keys_scaled, mean_norm, maximum_norm)
                     accelerator.log(logs, step=global_step)
+                    
+                if global_step % 25 == 0:                
+                    if len(val_dataloader) > 0:
+                        print("Validating バリデーション処理...")
 
+                        with torch.no_grad():
+                            val_dataloader_iter = iter(val_dataloader)
+                            batch = next(val_dataloader_iter)
+                            is_train = False
+                            loss = self.process_val_batch(batch, is_train, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+
+                            current_loss = loss.detach().item()
+                            val_loss_recorder.add(epoch=epoch, step=global_step, loss=current_loss)
+
+                            if args.logging_dir is not None:
+                                avr_loss: float = val_loss_recorder.moving_average
+                                logs = {"loss/validation_current": current_loss}
+                                accelerator.log(logs, step=global_step)
+                                
                 if global_step >= args.max_train_steps:
                     break
 
             if args.logging_dir is not None:
-                logs = {"loss/epoch": loss_recorder.moving_average}
+                logs = {"loss/epoch_average": loss_recorder.moving_average}                
                 accelerator.log(logs, step=epoch + 1)
 
+            if len(val_dataloader) > 0:
+                if args.logging_dir is not None:
+                    avr_loss: float = val_loss_recorder.moving_average
+                    logs = {"loss/validation_epoch_average": avr_loss}
+                    accelerator.log(logs, step=epoch + 1)
+                    
             accelerator.wait_for_everyone()
 
             # 指定エポックごとにモデルを保存
@@ -942,6 +1084,17 @@ class NetworkTrainer:
             ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
             save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
 
+            if args.enable_ema and args.ema_type == 'traditional':
+                # save directly
+                ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
+                save_model(os.path.splitext(ckpt_name)[0] + "-EMA" + os.path.splitext(ckpt_name)[1], emas[0].ema_model, global_step, num_train_epochs, force_sync_upload=True)
+
+                ## save EMA - copy and save
+                #emas[0].copy_params_from_ema_to_model()
+                #ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
+                #save_model(os.path.splitext(ckpt_name)[0] + "-EMA_" + os.path.splitext(ckpt_name)[1], network, global_step, num_train_epochs, force_sync_upload=True)
+
+            print("model saved.")
             logger.info("model saved.")
 
 
@@ -1045,6 +1198,18 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not use fp16/bf16 VAE in mixed precision (use float VAE) / mixed precisionでも fp16/bf16 VAEを使わずfloat VAEを使う",
     )
+    parser.add_argument(
+        "--validation_seed",
+        type=int,
+        default=None,
+        help="Validation seed"
+    )
+    parser.add_argument(
+        "--validation_split",
+        type=float,
+        default=0.0,
+        help="Split for validation images out of the training dataset"
+    )    
     return parser
 
 

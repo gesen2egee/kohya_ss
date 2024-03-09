@@ -22,9 +22,11 @@ import toml
 import voluptuous
 from voluptuous import (
     Any,
+    All,
     ExactSequence,
     MultipleInvalid,
     Object,
+    Length,
     Required,
     Schema,
 )
@@ -60,17 +62,26 @@ class BaseSubsetParams:
     caption_separator: str = (",",)
     keep_tokens: int = 0
     keep_tokens_separator: str = (None,)
+    use_object_template: bool = False
+    use_style_template: bool = False 
+    secondary_separator: Optional[str] = None
+    enable_wildcard: bool = False
     color_aug: bool = False
     flip_aug: bool = False
+    rotate_aug: bool = False
+    keras_aug: Optional[str] = None       
     face_crop_aug_range: Optional[Tuple[float, float]] = None
     random_crop: bool = False
+    mask_simple_background: bool = False
     caption_prefix: Optional[str] = None
     caption_suffix: Optional[str] = None
     caption_dropout_rate: float = 0.0
     caption_dropout_every_n_epochs: int = 0
-    caption_tag_dropout_rate: float = 0.0
+    caption_tag_dropout_rate: float = 0.0   
     token_warmup_min: int = 1
     token_warmup_step: float = 0
+    token_decay_min: int = 1
+    token_decay_step: float = 0
 
 
 @dataclass
@@ -98,7 +109,8 @@ class BaseDatasetParams:
     resolution: Optional[Tuple[int, int]] = None
     network_multiplier: float = 1.0
     debug_dataset: bool = False
-
+    validation_seed: Optional[int] = None
+    validation_split: float = 0.0
 
 @dataclass
 class DreamBoothDatasetParams(BaseDatasetParams):
@@ -109,8 +121,7 @@ class DreamBoothDatasetParams(BaseDatasetParams):
     bucket_reso_steps: int = 64
     bucket_no_upscale: bool = False
     prior_loss_weight: float = 1.0
-
-
+    
 @dataclass
 class FineTuningDatasetParams(BaseDatasetParams):
     batch_size: int = 1
@@ -176,13 +187,22 @@ class ConfigSanitizer:
         "color_aug": bool,
         "face_crop_aug_range": functools.partial(__validate_and_convert_twodim.__func__, float),
         "flip_aug": bool,
+        "rotate_aug": bool,
+        "keras_aug": Any(None, All([str])),
         "num_repeats": int,
         "random_crop": bool,
+        "mask_simple_background": bool,
         "shuffle_caption": bool,
         "keep_tokens": int,
         "keep_tokens_separator": str,
+        "use_object_template": bool,
+        "use_style_template": bool,
+        "secondary_separator": str,
+        "enable_wildcard": bool,
         "token_warmup_min": int,
         "token_warmup_step": Any(float, int),
+        "token_decay_min": int,
+        "token_decay_step": Any(float, int),
         "caption_prefix": str,
         "caption_suffix": str,
     }
@@ -222,8 +242,11 @@ class ConfigSanitizer:
         "enable_bucket": bool,
         "max_bucket_reso": int,
         "min_bucket_reso": int,
+        "validation_seed": int,
+        "validation_split": float,        
         "resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
         "network_multiplier": float,
+        
     }
 
     # options handled by argparse but not handled by user config
@@ -460,100 +483,117 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
             dataset_klass = FineTuningDataset
 
         subsets = [subset_klass(**asdict(subset_blueprint.params)) for subset_blueprint in dataset_blueprint.subsets]
-        dataset = dataset_klass(subsets=subsets, **asdict(dataset_blueprint.params))
+        dataset = dataset_klass(subsets=subsets, is_train=True, **asdict(dataset_blueprint.params))
         datasets.append(dataset)
 
-    # print info
-    info = ""
-    for i, dataset in enumerate(datasets):
-        is_dreambooth = isinstance(dataset, DreamBoothDataset)
-        is_controlnet = isinstance(dataset, ControlNetDataset)
-        info += dedent(
-            f"""\
-      [Dataset {i}]
-        batch_size: {dataset.batch_size}
-        resolution: {(dataset.width, dataset.height)}
-        enable_bucket: {dataset.enable_bucket}
-        network_multiplier: {dataset.network_multiplier}
-    """
-        )
+    val_datasets:List[Union[DreamBoothDataset, FineTuningDataset, ControlNetDataset]] = []
+    
+    for dataset_blueprint in dataset_group_blueprint.datasets:
+        if dataset_blueprint.params.validation_split <= 0.0:
+            continue
+        if dataset_blueprint.is_controlnet:
+            subset_klass = ControlNetSubset
+            dataset_klass = ControlNetDataset
+        elif dataset_blueprint.is_dreambooth:
+            subset_klass = DreamBoothSubset
+            dataset_klass = DreamBoothDataset
+        else:            
+            subset_klass = FineTuningSubset
+            dataset_klass = FineTuningDataset
+
+        subsets = [subset_klass(**asdict(subset_blueprint.params)) for subset_blueprint in dataset_blueprint.subsets]
+        dataset = dataset_klass(subsets=subsets, is_train=False, **asdict(dataset_blueprint.params))
+        val_datasets.append(dataset)
+
+    def print_info(_datasets):
+        info = ""
+        for i, dataset in enumerate(_datasets):
+            is_dreambooth = isinstance(dataset, DreamBoothDataset)
+            is_controlnet = isinstance(dataset, ControlNetDataset)
+            info += dedent(f"""\
+                [Dataset {i}]
+                batch_size: {dataset.batch_size}
+                resolution: {(dataset.width, dataset.height)}
+                enable_bucket: {dataset.enable_bucket}
+            """)
 
         if dataset.enable_bucket:
-            info += indent(
-                dedent(
-                    f"""\
-        min_bucket_reso: {dataset.min_bucket_reso}
-        max_bucket_reso: {dataset.max_bucket_reso}
-        bucket_reso_steps: {dataset.bucket_reso_steps}
-        bucket_no_upscale: {dataset.bucket_no_upscale}
-      \n"""
-                ),
-                "  ",
-            )
+            info += indent(dedent(f"""\
+                min_bucket_reso: {dataset.min_bucket_reso}
+                max_bucket_reso: {dataset.max_bucket_reso}
+                bucket_reso_steps: {dataset.bucket_reso_steps}
+                bucket_no_upscale: {dataset.bucket_no_upscale}
+            \n"""), "  ")
         else:
             info += "\n"
-
         for j, subset in enumerate(dataset.subsets):
-            info += indent(
-                dedent(
-                    f"""\
-        [Subset {j} of Dataset {i}]
-          image_dir: "{subset.image_dir}"
-          image_count: {subset.img_count}
-          num_repeats: {subset.num_repeats}
-          shuffle_caption: {subset.shuffle_caption}
-          keep_tokens: {subset.keep_tokens}
-          keep_tokens_separator: {subset.keep_tokens_separator}
-          caption_dropout_rate: {subset.caption_dropout_rate}
-          caption_dropout_every_n_epoches: {subset.caption_dropout_every_n_epochs}
-          caption_tag_dropout_rate: {subset.caption_tag_dropout_rate}
-          caption_prefix: {subset.caption_prefix}
-          caption_suffix: {subset.caption_suffix}
-          color_aug: {subset.color_aug}
-          flip_aug: {subset.flip_aug}
-          face_crop_aug_range: {subset.face_crop_aug_range}
-          random_crop: {subset.random_crop}
-          token_warmup_min: {subset.token_warmup_min},
-          token_warmup_step: {subset.token_warmup_step},
-      """
-                ),
-                "  ",
-            )
+            info += indent(dedent(f"""\
+                [Subset {j} of Dataset {i}]
+                  image_dir: "{subset.image_dir}"
+                  image_count: {subset.img_count}
+                  num_repeats: {subset.num_repeats}
+                  shuffle_caption: {subset.shuffle_caption}
+                  keep_tokens: {subset.keep_tokens}
+                  keep_tokens_separator: {subset.keep_tokens_separator}
+                  use_object_template: bool = {subset.use_object_template}
+                  use_style_template: bool = {subset.use_style_template}
+                  secondary_separator: {subset.secondary_separator}
+                  enable_wildcard: {subset.enable_wildcard}
+                  caption_dropout_rate: {subset.caption_dropout_rate}
+                  caption_dropout_every_n_epoches: {subset.caption_dropout_every_n_epochs}
+                  caption_tag_dropout_rate: {subset.caption_tag_dropout_rate}
+                  caption_prefix: {subset.caption_prefix}
+                  caption_suffix: {subset.caption_suffix}
+                  color_aug: {subset.color_aug}
+                  flip_aug: {subset.flip_aug}
+                  rotate_aug: {subset.rotate_aug}   
+                  keras_aug: {subset.keras_aug}
+                  face_crop_aug_range: {subset.face_crop_aug_range}
+                  random_crop: {subset.random_crop}
+                  mask_simple_background: {subset.mask_simple_background}          
+                  token_warmup_min: {subset.token_warmup_min},
+                  token_warmup_step: {subset.token_warmup_step},
+                  token_decay_min: {subset.token_decay_min},
+                  token_decay_step: {subset.token_decay_step},
+            """), "  ")
 
-            if is_dreambooth:
-                info += indent(
-                    dedent(
-                        f"""\
-          is_reg: {subset.is_reg}
-          class_tokens: {subset.class_tokens}
-          caption_extension: {subset.caption_extension}
-        \n"""
-                    ),
-                    "    ",
-                )
-            elif not is_controlnet:
-                info += indent(
-                    dedent(
-                        f"""\
-          metadata_file: {subset.metadata_file}
-        \n"""
-                    ),
-                    "    ",
-                )
+        if is_dreambooth:
+            info += indent(dedent(f"""\
+                is_reg: {subset.is_reg}
+                class_tokens: {subset.class_tokens}
+                caption_extension: {subset.caption_extension}
+            \n"""), "    ")
+        elif not is_controlnet:
+            info += indent(dedent(f"""\
+                metadata_file: {subset.metadata_file}
+            \n"""), "    ")
 
-    logger.info(f'{info}')
+        print(info)
 
+    print_info(datasets)
+
+    if len(val_datasets) > 0:
+        print("Validation dataset")
+        print_info(val_datasets)         
+ 
     # make buckets first because it determines the length of dataset
     # and set the same seed for all datasets
     seed = random.randint(0, 2**31) # actual seed is seed + epoch_no
     for i, dataset in enumerate(datasets):
-        logger.info(f"[Dataset {i}]")
+        print(f"[Dataset {i}]")
+        dataset.make_buckets()
+        dataset.set_seed(seed)
+    
+    for i, dataset in enumerate(val_datasets):
+        print(f"[Validation Dataset {i}]")
         dataset.make_buckets()
         dataset.set_seed(seed)
 
-    return DatasetGroup(datasets)
-
-
+    return (
+        DatasetGroup(datasets),
+        DatasetGroup(val_datasets) if val_datasets else None
+    )        
+        
 def generate_dreambooth_subsets_config_by_subdirs(train_data_dir: Optional[str] = None, reg_data_dir: Optional[str] = None):
     def extract_dreambooth_params(name: str) -> Tuple[int, str]:
         tokens = name.split("_")

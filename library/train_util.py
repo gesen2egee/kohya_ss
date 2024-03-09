@@ -19,6 +19,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    Callable,
 )
 from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs, PartialState
 import glob
@@ -69,6 +70,8 @@ from library.lpw_stable_diffusion import StableDiffusionLongPromptWeightingPipel
 import library.model_util as model_util
 import library.huggingface_util as huggingface_util
 import library.sai_model_spec as sai_model_spec
+from keras.preprocessing.image import ImageDataGenerator
+from library import token_merging
 from library.utils import setup_logging
 
 setup_logging()
@@ -78,6 +81,10 @@ logger = logging.getLogger(__name__)
 # from library.attention_processors import FlashAttnProcessor
 # from library.hypernetwork import replace_attentions_for_hypernetwork
 from library.original_unet import UNet2DConditionModel
+from copy import deepcopy
+from functools import partial
+from beartype import beartype
+from beartype.typing import Set, Optional
 
 # Tokenizer: checkpointから読み込むのではなくあらかじめ提供されているものを使う
 TOKENIZER_PATH = "openai/clip-vit-large-patch14"
@@ -101,6 +108,59 @@ STEP_DIFFUSERS_DIR_NAME = "{}-step{:08d}"
 # region dataset
 
 IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".PNG", ".JPG", ".JPEG", ".WEBP", ".BMP"]
+
+imagenet_templates_small = [
+    "a photo of a ",
+    "a rendering of a ",
+    "a cropped photo of the ",
+    "the photo of a ",
+    "a photo of a clean ",
+    "a photo of a dirty ",
+    "a dark photo of the ",
+    "a photo of my ",
+    "a photo of the cool ",
+    "a close-up photo of a ",
+    "a bright photo of the ",
+    "a cropped photo of a ",
+    "a photo of the ",
+    "a good photo of the ",
+    "a photo of one ",
+    "a close-up photo of the ",
+    "a rendition of the ",
+    "a photo of the clean ",
+    "a rendition of a ",
+    "a photo of a nice ",
+    "a good photo of a ",
+    "a photo of the nice ",
+    "a photo of the small ",
+    "a photo of the weird ",
+    "a photo of the large ",
+    "a photo of a cool ",
+    "a photo of a small ",
+]
+
+imagenet_style_templates_small = [
+    "a painting in the style of ",
+    "a rendering in the style of ",
+    "a cropped painting in the style of ",
+    "the painting in the style of ",
+    "a clean painting in the style of ",
+    "a dirty painting in the style of ",
+    "a dark painting in the style of ",
+    "a picture in the style of ",
+    "a cool painting in the style of ",
+    "a close-up painting in the style of ",
+    "a bright painting in the style of ",
+    "a cropped painting in the style of ",
+    "a good painting in the style of ",
+    "a close-up painting in the style of ",
+    "a rendition in the style of ",
+    "a nice painting in the style of ",
+    "a small painting in the style of ",
+    "a weird painting in the style of ",
+    "a large painting in the style of ",
+]
+
 
 try:
     import pillow_avif
@@ -134,6 +194,20 @@ IMAGE_TRANSFORMS = transforms.Compose(
 
 TEXT_ENCODER_OUTPUTS_CACHE_SUFFIX = "_te_outputs.npz"
 
+def split_train_val(paths, is_train, validation_split, validation_seed):
+    if validation_seed is not None:
+        print(f"Using validation seed: {validation_seed}")
+        prevstate = random.getstate()
+        random.seed(validation_seed)
+        random.shuffle(paths)
+        random.setstate(prevstate)
+    else:
+        random.shuffle(paths)
+
+    if is_train:
+        return paths[0:math.ceil(len(paths) * (1 - validation_split))]
+    else:
+        return paths[len(paths) - round(len(paths) * validation_split):]
 
 class ImageInfo:
     def __init__(self, image_key: str, num_repeats: int, caption: str, is_reg: bool, absolute_path: str) -> None:
@@ -157,6 +231,9 @@ class ImageInfo:
         self.text_encoder_outputs1: Optional[torch.Tensor] = None
         self.text_encoder_outputs2: Optional[torch.Tensor] = None
         self.text_encoder_pool2: Optional[torch.Tensor] = None
+        # Masked Loss
+        self.mask: np.ndarray = None
+        self.mask_flipped: np.ndarray = None
 
 
 class BucketManager:
@@ -334,26 +411,83 @@ class AugHelper:
         # )
         hue_shift_limit = 8
 
+        rgb_channels = image[:, :, :3] 
+        alpha_channel = image[:, :, -1]
         # remove dependency to albumentations
         if random.random() <= 0.33:
             if random.random() > 0.5:
                 # hue shift
-                hsv_img = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+                hsv_img = cv2.cvtColor(rgb_channels, cv2.COLOR_BGR2HSV)
                 hue_shift = random.uniform(-hue_shift_limit, hue_shift_limit)
                 if hue_shift < 0:
                     hue_shift = 180 + hue_shift
                 hsv_img[:, :, 0] = (hsv_img[:, :, 0] + hue_shift) % 180
-                image = cv2.cvtColor(hsv_img, cv2.COLOR_HSV2BGR)
+                rgb_channels = cv2.cvtColor(hsv_img, cv2.COLOR_HSV2BGR)
             else:
                 # random gamma
                 gamma = random.uniform(0.95, 1.05)
-                image = np.clip(image**gamma, 0, 255).astype(np.uint8)
+                rgb_channels = np.clip(rgb_channels**gamma, 0, 255).astype(np.uint8)
 
+        image = np.dstack((rgb_channels, alpha_channel)) 
+        return {"image": image}
+        
+    def rotate_aug(self, image: np.ndarray):
+    
+        angle = np.random.uniform(-30, 30)
+        rgb = image[..., :3]
+
+        height, width = rgb.shape[:2]
+        center = (width / 2, height / 2)
+        shift_w = width * 0.05 * random.uniform(-1, 1)
+        shift_h = height * 0.05 * random.uniform(-1, 1)
+        center = (center[0] + shift_w, center[1] + shift_h)
+        rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rgb = cv2.warpAffine(rgb, rotation_matrix, (width, height), borderMode=cv2.BORDER_REPLICATE)
+
+        if image.shape[2] == 4:
+            a = image[..., 3]        
+            rotated_a = cv2.warpAffine(a, rotation_matrix, (width, height), borderMode=cv2.BORDER_REPLICATE)
+            image = np.dstack([rgb, rotated_a])
+        else:
+            image = rgb
+            
+        return {"image": image} 
+
+    def keras_aug(self, image: np.ndarray, keras_aug):
+
+        original_image_prob = 0
+        keras_augs_kwargs = {}
+        image = image.astype(np.uint8)
+        for arg in keras_aug:
+            key, value = arg.split("=")
+            if key == "original_image":
+                original_image_prob = float(value)
+            else:
+                value = ast.literal_eval(value) 
+                keras_augs_kwargs[key] = value
+                
+        if random.random() <= original_image_prob:
+            return {"image": image}
+
+        datagen = ImageDataGenerator(**keras_augs_kwargs)
+        image = image.reshape((1,) + image.shape)
+        for batch in datagen.flow(image, batch_size=1):
+            image = batch[0]         
+            break  
+        
         return {"image": image}
 
-    def get_augmentor(self, use_color_aug: bool):  # -> Optional[Callable[[np.ndarray], Dict[str, np.ndarray]]]:
-        return self.color_aug if use_color_aug else None
 
+    def get_augmentor(self, color_aug=False, rotate_aug=False, keras_aug=None):
+        def aug(image):
+            if color_aug:
+                image = self.color_aug(image)["image"]
+            if rotate_aug:
+                image = self.rotate_aug(image)["image"]
+            if keras_aug is not None:
+                image = self.keras_aug(image, keras_aug)["image"]
+            return {"image": image}
+        return aug
 
 class BaseSubset:
     def __init__(
@@ -364,10 +498,17 @@ class BaseSubset:
         caption_separator: str,
         keep_tokens: int,
         keep_tokens_separator: str,
+        use_object_template: bool,
+        use_style_template: bool, 
+        secondary_separator: Optional[str],
+        enable_wildcard: bool,
         color_aug: bool,
         flip_aug: bool,
+        rotate_aug: bool,
+        keras_aug: Optional[str],
         face_crop_aug_range: Optional[Tuple[float, float]],
         random_crop: bool,
+        mask_simple_background: bool,
         caption_dropout_rate: float,
         caption_dropout_every_n_epochs: int,
         caption_tag_dropout_rate: float,
@@ -375,6 +516,8 @@ class BaseSubset:
         caption_suffix: Optional[str],
         token_warmup_min: int,
         token_warmup_step: Union[float, int],
+        token_decay_min: int,
+        token_decay_step: Union[float, int],
     ) -> None:
         self.image_dir = image_dir
         self.num_repeats = num_repeats
@@ -382,10 +525,17 @@ class BaseSubset:
         self.caption_separator = caption_separator
         self.keep_tokens = keep_tokens
         self.keep_tokens_separator = keep_tokens_separator
+        self.use_object_template = use_object_template
+        self.use_style_template = use_style_template 
+        self.secondary_separator = secondary_separator
+        self.enable_wildcard = enable_wildcard
         self.color_aug = color_aug
         self.flip_aug = flip_aug
+        self.rotate_aug = rotate_aug
+        self.keras_aug = keras_aug        
         self.face_crop_aug_range = face_crop_aug_range
         self.random_crop = random_crop
+        self.mask_simple_background = mask_simple_background
         self.caption_dropout_rate = caption_dropout_rate
         self.caption_dropout_every_n_epochs = caption_dropout_every_n_epochs
         self.caption_tag_dropout_rate = caption_tag_dropout_rate
@@ -394,6 +544,8 @@ class BaseSubset:
 
         self.token_warmup_min = token_warmup_min  # step=0におけるタグの数
         self.token_warmup_step = token_warmup_step  # N（N<1ならN*max_train_steps）ステップ目でタグの数が最大になる
+        self.token_decay_min = token_decay_min if token_decay_min is not None else token_warmup_min  # 最小トークン数。指定されていない場合は、ウォームアップの最小トークン数が使用されます。
+        self.token_decay_step = token_decay_step  # トークン数が減少し始めるステップ。1未満の値が指定された場合、max_train_stepsの割合として解釈されます。
 
         self.img_count = 0
 
@@ -410,10 +562,17 @@ class DreamBoothSubset(BaseSubset):
         caption_separator: str,
         keep_tokens,
         keep_tokens_separator,
+        use_object_template,
+        use_style_template,
+        secondary_separator,
+        enable_wildcard,
         color_aug,
         flip_aug,
+        rotate_aug,   
+        keras_aug,
         face_crop_aug_range,
         random_crop,
+        mask_simple_background: bool,
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
@@ -421,6 +580,8 @@ class DreamBoothSubset(BaseSubset):
         caption_suffix,
         token_warmup_min,
         token_warmup_step,
+        token_decay_min,
+        token_decay_step,
     ) -> None:
         assert image_dir is not None, "image_dir must be specified / image_dirは指定が必須です"
 
@@ -431,10 +592,17 @@ class DreamBoothSubset(BaseSubset):
             caption_separator,
             keep_tokens,
             keep_tokens_separator,
+            use_object_template,
+            use_style_template,
+            secondary_separator,
+            enable_wildcard,
             color_aug,
             flip_aug,
+            rotate_aug,   
+            keras_aug,            
             face_crop_aug_range,
             random_crop,
+            mask_simple_background,
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
@@ -442,6 +610,8 @@ class DreamBoothSubset(BaseSubset):
             caption_suffix,
             token_warmup_min,
             token_warmup_step,
+            token_decay_min,
+            token_decay_step,
         )
 
         self.is_reg = is_reg
@@ -466,10 +636,17 @@ class FineTuningSubset(BaseSubset):
         caption_separator,
         keep_tokens,
         keep_tokens_separator,
+        use_object_template,
+        use_style_template,
+        secondary_separator,
+        enable_wildcard,
         color_aug,
         flip_aug,
+        rotate_aug,   
+        keras_aug,        
         face_crop_aug_range,
         random_crop,
+        mask_simple_background: bool,
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
@@ -477,6 +654,8 @@ class FineTuningSubset(BaseSubset):
         caption_suffix,
         token_warmup_min,
         token_warmup_step,
+        token_decay_min,
+        token_decay_step,
     ) -> None:
         assert metadata_file is not None, "metadata_file must be specified / metadata_fileは指定が必須です"
 
@@ -487,10 +666,17 @@ class FineTuningSubset(BaseSubset):
             caption_separator,
             keep_tokens,
             keep_tokens_separator,
+            use_object_template,
+            use_style_template,
+            secondary_separator,
+            enable_wildcard,
             color_aug,
             flip_aug,
+            rotate_aug,   
+            keras_aug,            
             face_crop_aug_range,
             random_crop,
+            mask_simple_background,
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
@@ -498,6 +684,8 @@ class FineTuningSubset(BaseSubset):
             caption_suffix,
             token_warmup_min,
             token_warmup_step,
+            token_decay_min,
+            token_decay_step,
         )
 
         self.metadata_file = metadata_file
@@ -519,10 +707,17 @@ class ControlNetSubset(BaseSubset):
         caption_separator,
         keep_tokens,
         keep_tokens_separator,
+        use_object_template,
+        use_style_template,
+        secondary_separator,
+        enable_wildcard,
         color_aug,
         flip_aug,
+        rotate_aug,   
+        keras_aug,        
         face_crop_aug_range,
         random_crop,
+        mask_simple_background: bool,
         caption_dropout_rate,
         caption_dropout_every_n_epochs,
         caption_tag_dropout_rate,
@@ -530,6 +725,8 @@ class ControlNetSubset(BaseSubset):
         caption_suffix,
         token_warmup_min,
         token_warmup_step,
+        token_decay_min,
+        token_decay_step,
     ) -> None:
         assert image_dir is not None, "image_dir must be specified / image_dirは指定が必須です"
 
@@ -540,10 +737,17 @@ class ControlNetSubset(BaseSubset):
             caption_separator,
             keep_tokens,
             keep_tokens_separator,
+            use_object_template,
+            use_style_template,
+            secondary_separator,
+            enable_wildcard,
             color_aug,
             flip_aug,
+            rotate_aug,   
+            keras_aug,            
             face_crop_aug_range,
             random_crop,
+            mask_simple_background,
             caption_dropout_rate,
             caption_dropout_every_n_epochs,
             caption_tag_dropout_rate,
@@ -551,6 +755,8 @@ class ControlNetSubset(BaseSubset):
             caption_suffix,
             token_warmup_min,
             token_warmup_step,
+            token_decay_min,
+            token_decay_step,
         )
 
         self.conditioning_data_dir = conditioning_data_dir
@@ -658,12 +864,12 @@ class BaseDataset(torch.utils.data.Dataset):
         self.replacements[str_from] = str_to
 
     def process_caption(self, subset: BaseSubset, caption):
+        caption = random.choice(caption.split('[[[WiLdCaRd]]]'))
         # caption に prefix/suffix を付ける
         if subset.caption_prefix:
             caption = subset.caption_prefix + " " + caption
         if subset.caption_suffix:
             caption = caption + " " + subset.caption_suffix
-
         # dropoutの決定：tag dropがこのメソッド内にあるのでここで行うのが良い
         is_drop_out = subset.caption_dropout_rate > 0 and random.random() < subset.caption_dropout_rate
         is_drop_out = (
@@ -675,15 +881,41 @@ class BaseDataset(torch.utils.data.Dataset):
         if is_drop_out:
             caption = ""
         else:
-            if subset.shuffle_caption or subset.token_warmup_step > 0 or subset.caption_tag_dropout_rate > 0:
+            # process wildcards
+            if subset.enable_wildcard:
+                # wildcard is like '{aaa|bbb|ccc...}'
+                # escape the curly braces like {{ or }}
+                replacer1 = "⦅"
+                replacer2 = "⦆"
+                while replacer1 in caption or replacer2 in caption:
+                    replacer1 += "⦅"
+                    replacer2 += "⦆"
+
+                caption = caption.replace("{{", replacer1).replace("}}", replacer2)
+
+                # replace the wildcard
+                def replace_wildcard(match):
+                    return random.choice(match.group(1).split("|"))
+
+                caption = re.sub(r"\{([^}]+)\}", replace_wildcard, caption)
+
+                # unescape the curly braces
+                caption = caption.replace(replacer1, "{").replace(replacer2, "}")
+
+            if subset.shuffle_caption or subset.token_warmup_step > 0 or subset.token_decay_step > 0 or subset.caption_tag_dropout_rate > 0:
                 fixed_tokens = []
                 flex_tokens = []
+                fixed_suffix_tokens = []
                 if (
                     hasattr(subset, "keep_tokens_separator")
                     and subset.keep_tokens_separator
                     and subset.keep_tokens_separator in caption
                 ):
                     fixed_part, flex_part = caption.split(subset.keep_tokens_separator, 1)
+                    if subset.keep_tokens_separator in flex_part:
+                        flex_part, fixed_suffix_part = flex_part.split(subset.keep_tokens_separator, 1)
+                        fixed_suffix_tokens = [t.strip() for t in fixed_suffix_part.split(subset.caption_separator) if t.strip()]
+
                     fixed_tokens = [t.strip() for t in fixed_part.split(subset.caption_separator) if t.strip()]
                     flex_tokens = [t.strip() for t in flex_part.split(subset.caption_separator) if t.strip()]
                 else:
@@ -692,9 +924,14 @@ class BaseDataset(torch.utils.data.Dataset):
                     if subset.keep_tokens > 0:
                         fixed_tokens = flex_tokens[: subset.keep_tokens]
                         flex_tokens = tokens[subset.keep_tokens :]
-
+                if subset.use_object_template or subset.use_style_template:
+                    imagenet_templates = imagenet_templates_small if subset.use_object_template else imagenet_style_templates_small
+                    imagenet_template = [random.choice(imagenet_templates)]
+                    fixed_tokens = imagenet_template + fixed_tokens  
                 if subset.token_warmup_step < 1:  # 初回に上書きする
                     subset.token_warmup_step = math.floor(subset.token_warmup_step * self.max_train_steps)
+                if subset.token_decay_step < 1:  # 初回に上書きする
+                    subset.token_decay_step = math.floor(subset.token_decay_step * self.max_train_steps)                    
                 if subset.token_warmup_step and self.current_step < subset.token_warmup_step:
                     tokens_len = (
                         math.floor(
@@ -703,7 +940,16 @@ class BaseDataset(torch.utils.data.Dataset):
                         + subset.token_warmup_min
                     )
                     flex_tokens = flex_tokens[:tokens_len]
-
+                if subset.token_decay_step and self.current_step >= subset.token_decay_step and (self.max_train_steps - subset.token_decay_step) > 0:
+                    decay_progress = (self.current_step - subset.token_decay_step) / (self.max_train_steps - subset.token_decay_step)
+                    tokens_len = (
+                        math.floor(
+                            (1 - decay_progress) * (len(flex_tokens) - subset.token_decay_min) 
+                        )
+                        + subset.token_decay_min
+                    )
+                    flex_tokens = flex_tokens[:tokens_len]
+                    
                 def dropout_tags(tokens):
                     if subset.caption_tag_dropout_rate <= 0:
                         return tokens
@@ -718,7 +964,11 @@ class BaseDataset(torch.utils.data.Dataset):
 
                 flex_tokens = dropout_tags(flex_tokens)
 
-                caption = ", ".join(fixed_tokens + flex_tokens)
+                caption = ", ".join(fixed_tokens + flex_tokens + fixed_suffix_tokens)
+
+            # process secondary separator
+            if subset.secondary_separator:
+                caption = caption.replace(subset.secondary_separator, subset.caption_separator)
 
             # textual inversion対応
             for str_from, str_to in self.replacements.items():
@@ -904,6 +1154,7 @@ class BaseDataset(torch.utils.data.Dataset):
                     subset.caption_dropout_rate > 0
                     or subset.shuffle_caption
                     or subset.token_warmup_step > 0
+                    or subset.token_decay_step > 0
                     or subset.caption_tag_dropout_rate > 0
                 )
                 for subset in self.subsets
@@ -911,7 +1162,7 @@ class BaseDataset(torch.utils.data.Dataset):
         )
 
     def cache_latents(self, vae, vae_batch_size=1, cache_to_disk=False, is_main_process=True):
-        # マルチGPUには対応していないので、そちらはtools/cache_latents.pyを使うこと
+                # マルチGPUには対応していないので、そちらはtools/cache_latents.pyを使うこと
         logger.info("caching latents.")
 
         image_infos = list(self.image_data.values())
@@ -961,7 +1212,7 @@ class BaseDataset(torch.utils.data.Dataset):
         # iterate batches: batch doesn't have image, image will be loaded in cache_batch_latents and discarded
         logger.info("caching latents...")
         for batch in tqdm(batches, smoothing=1, total=len(batches)):
-            cache_batch_latents(vae, cache_to_disk, batch, subset.flip_aug, subset.random_crop)
+            cache_batch_latents(vae, cache_to_disk, batch, subset.flip_aug, subset.random_crop, subset.mask_simple_background)
 
     # weight_dtypeを指定するとText Encoderそのもの、およひ出力がweight_dtypeになる
     # SDXLでのみ有効だが、datasetのメソッドとする必要があるので、sdxl_train_util.pyではなくこちらに実装する
@@ -1027,6 +1278,10 @@ class BaseDataset(torch.utils.data.Dataset):
             )
 
     def get_image_size(self, image_path):
+        npz_path = os.path.splitext(image_path)[0] + ".npz"
+        if self.is_latent_cacheable and os.path.exists(npz_path):
+            _, size, _, _, _ = load_latents_from_disk(npz_path)
+            return size
         image = Image.open(image_path)
         return image.size
 
@@ -1109,6 +1364,7 @@ class BaseDataset(torch.utils.data.Dataset):
         input_ids2_list = []
         latents_list = []
         images = []
+        masks = []
         original_sizes_hw = []
         crop_top_lefts = []
         target_sizes_hw = []
@@ -1132,14 +1388,17 @@ class BaseDataset(torch.utils.data.Dataset):
                 crop_ltrb = image_info.latents_crop_ltrb  # calc values later if flipped
                 if not flipped:
                     latents = image_info.latents
+                    mask = image_info.mask
                 else:
                     latents = image_info.latents_flipped
+                    mask = image_info.mask_flipped
 
                 image = None
             elif image_info.latents_npz is not None:  # FineTuningDatasetまたはcache_latents_to_disk=Trueの場合
-                latents, original_size, crop_ltrb, flipped_latents = load_latents_from_disk(image_info.latents_npz)
+                latents, original_size, crop_ltrb, flipped_latents, mask = load_latents_from_disk(image_info.latents_npz)
                 if flipped:
                     latents = flipped_latents
+                    mask = np.flip(mask, axis=1)
                     del flipped_latents
                 latents = torch.FloatTensor(latents)
 
@@ -1174,20 +1433,40 @@ class BaseDataset(torch.utils.data.Dataset):
 
                     original_size = [im_w, im_h]
                     crop_ltrb = (0, 0, 0, 0)
-
+                    
+                if subset.mask_simple_background:
+                    edge_width = max(1, min(image.shape[0], image.shape[1]) // 20)
+                    top_edge = image[:edge_width, :, :]
+                    bottom_edge = image[-edge_width:, :, :]
+                    left_edge = image[:, :edge_width, :].reshape(-1, image.shape[2])
+                    right_edge = image[:, -edge_width:, :].reshape(-1, image.shape[2])
+                    edges = np.concatenate([top_edge.reshape(-1, image.shape[2]), 
+                                            bottom_edge.reshape(-1, image.shape[2]),
+                                            left_edge, right_edge])
+                    colors, counts = np.unique(edges, axis=0, return_counts=True)
+                    simple_color = colors[counts.argmax()]
+                    simple_color_ratio = counts.max() / counts.sum()
+                    if simple_color_ratio > 0.3:
+                        simple_color_mask = np.all(image[:, :, :-1] == simple_color[:3], axis=2)
+                        image[simple_color_mask, -1] = 0
+                
                 # augmentation
-                aug = self.aug_helper.get_augmentor(subset.color_aug)
-                if aug is not None:
-                    img = aug(image=img)["image"]
+                aug = self.aug_helper.get_augmentor(subset.color_aug, subset.rotate_aug, subset.keras_aug)
+                img = aug(image=img)["image"]
 
                 if flipped:
                     img = img[:, ::-1, :].copy()  # copy to avoid negative stride problem
+
+                # loss mask is alpha channel, separate it
+                mask = img[:, :, -1] / 255
+                img = img[:, :, :3]
 
                 latents = None
                 image = self.image_transforms(img)  # -1.0~1.0のtorch.Tensorになる
 
             images.append(image)
             latents_list.append(latents)
+            masks.append(torch.tensor(mask))
 
             target_size = (image.shape[2], image.shape[1]) if image is not None else (latents.shape[2] * 8, latents.shape[1] * 8)
 
@@ -1279,7 +1558,7 @@ class BaseDataset(torch.utils.data.Dataset):
         else:
             images = None
         example["images"] = images
-
+        example["masks"] = torch.stack(masks) if masks[0] is not None else None
         example["latents"] = torch.stack(latents_list) if latents_list[0] is not None else None
         example["captions"] = captions
 
@@ -1327,7 +1606,7 @@ class BaseDataset(torch.utils.data.Dataset):
 
             if self.caching_mode == "text":
                 input_ids1 = self.get_input_ids(caption, self.tokenizers[0])
-                input_ids2 = self.get_input_ids(caption, self.tokenizers[1])
+                input_ids2 = self.get_input_ids(caption, self.tokenizers[1]) if len(self.tokenizers) > 1 else None
             else:
                 input_ids1 = None
                 input_ids2 = None
@@ -1360,6 +1639,7 @@ class DreamBoothDataset(BaseDataset):
     def __init__(
         self,
         subsets: Sequence[DreamBoothSubset],
+        is_train: bool,        
         batch_size: int,
         tokenizer,
         max_token_length,
@@ -1371,12 +1651,17 @@ class DreamBoothDataset(BaseDataset):
         bucket_reso_steps: int,
         bucket_no_upscale: bool,
         prior_loss_weight: float,
+        validation_split: float,
+        validation_seed: Optional[int],        
         debug_dataset: bool,
     ) -> None:
         super().__init__(tokenizer, max_token_length, resolution, network_multiplier, debug_dataset)
 
         assert resolution is not None, f"resolution is required / resolution（解像度）指定は必須です"
 
+        self.is_train = is_train
+        self.validation_split = validation_split
+        self.validation_seed = validation_seed 
         self.batch_size = batch_size
         self.size = min(self.width, self.height)  # 短いほう
         self.prior_loss_weight = prior_loss_weight
@@ -1419,7 +1704,7 @@ class DreamBoothDataset(BaseDataset):
                             logger.error(f"illegal char in file (not UTF-8) / ファイルにUTF-8以外の文字があります: {cap_path}")
                             raise e
                         assert len(lines) > 0, f"caption file is empty / キャプションファイルが空です: {cap_path}"
-                        caption = lines[0].strip()
+                        caption = '[[[WiLdCaRd]]]'.join(lines)
                     break
             return caption
 
@@ -1428,12 +1713,16 @@ class DreamBoothDataset(BaseDataset):
                 logger.warning(f"not directory: {subset.image_dir}")
                 return [], []
 
+
             img_paths = glob_images(subset.image_dir, "*")
+            if self.validation_split > 0.0:
+                img_paths = split_train_val(img_paths, self.is_train, self.validation_split, self.validation_seed)            
             logger.info(f"found directory {subset.image_dir} contains {len(img_paths)} image files")
 
             # 画像ファイルごとにプロンプトを読み込み、もしあればそちらを使う
             captions = []
             missing_captions = []
+            cached_captions = []
             for img_path in img_paths:
                 cap_for_img = read_caption(img_path, subset.caption_extension)
                 if cap_for_img is None and subset.class_tokens is None:
@@ -1451,10 +1740,14 @@ class DreamBoothDataset(BaseDataset):
 
             self.set_tag_frequency(os.path.basename(subset.image_dir), captions)  # タグ頻度を記録
 
-            if missing_captions:
-                number_of_missing_captions = len(missing_captions)
-                number_of_missing_captions_to_show = 5
-                remaining_missing_captions = number_of_missing_captions - number_of_missing_captions_to_show
+            def show_caption_warning(captions_with_warnings, warning_message):
+                if not captions_with_warnings:
+                    return
+                
+                number_of_warning_captions = len(captions_with_warnings)
+                number_of_warning_captions_to_show = 5
+                remaining_warning_captions = number_of_warning_captions - number_of_warning_captions_to_show
+
 
                 logger.warning(
                     f"No caption file found for {number_of_missing_captions} images. Training will continue without captions for these images. If class token exists, it will be used. / {number_of_missing_captions}枚の画像にキャプションファイルが見つかりませんでした。これらの画像についてはキャプションなしで学習を続行します。class tokenが存在する場合はそれを使います。"
@@ -1774,8 +2067,14 @@ class ControlNetDataset(BaseDataset):
                 subset.caption_separator,
                 subset.keep_tokens,
                 subset.keep_tokens_separator,
+                subset.use_object_template,
+                subset.use_style_template,
+                subset.secondary_separator,
+                subset.enable_wildcard,
                 subset.color_aug,
                 subset.flip_aug,
+                subset.rotate_aug,   
+                subset.keras_aug,                
                 subset.face_crop_aug_range,
                 subset.random_crop,
                 subset.caption_dropout_rate,
@@ -1785,6 +2084,8 @@ class ControlNetDataset(BaseDataset):
                 subset.caption_suffix,
                 subset.token_warmup_min,
                 subset.token_warmup_step,
+                subset.token_decay_min,
+                subset.token_decay_step,
             )
             db_subsets.append(db_subset)
 
@@ -1836,7 +2137,7 @@ class ControlNetDataset(BaseDataset):
 
         extra_imgs = []
         for subset in subsets:
-            conditioning_img_paths = glob_images(subset.conditioning_data_dir, "*")
+            conditioning_img_paths = glob_images(subset.conditioning_data_dir, "*", self.is_latent_cacheable)
             extra_imgs.extend(
                 [cond_img_path for cond_img_path in conditioning_img_paths if cond_img_path not in cond_imgs_with_img]
             )
@@ -2010,7 +2311,7 @@ def is_disk_cached_latents_is_expected(reso, npz_path: str, flip_aug: bool):
 # 戻り値は、latents_tensor, (original_size width, original_size height), (crop left, crop top)
 def load_latents_from_disk(
     npz_path,
-) -> Tuple[Optional[torch.Tensor], Optional[List[int]], Optional[List[int]], Optional[torch.Tensor]]:
+) -> Tuple[Optional[torch.Tensor], Optional[List[int]], Optional[List[int]], Optional[torch.Tensor], Optional[np.ndarray]]:
     npz = np.load(npz_path)
     if "latents" not in npz:
         raise ValueError(f"error: npz is old format. please re-generate {npz_path}")
@@ -2019,14 +2320,19 @@ def load_latents_from_disk(
     original_size = npz["original_size"].tolist()
     crop_ltrb = npz["crop_ltrb"].tolist()
     flipped_latents = npz["latents_flipped"] if "latents_flipped" in npz else None
-    return latents, original_size, crop_ltrb, flipped_latents
+    mask = npz["mask"] if "mask" in npz else None
+    if mask is not None:
+        mask = mask.astype(np.float32)    
+    return latents, original_size, crop_ltrb, flipped_latents, mask
 
 
-def save_latents_to_disk(npz_path, latents_tensor, original_size, crop_ltrb, flipped_latents_tensor=None):
+def save_latents_to_disk(npz_path, latents_tensor, original_size, crop_ltrb, flipped_latents_tensor=None, mask=None):
     kwargs = {}
     if flipped_latents_tensor is not None:
         kwargs["latents_flipped"] = flipped_latents_tensor.float().cpu().numpy()
-    np.savez(
+    if mask is not None:
+        kwargs["mask"] = np.array(mask, dtype=np.uint8)       
+    np.savez_compressed(
         npz_path,
         latents=latents_tensor.float().cpu().numpy(),
         original_size=np.array(original_size),
@@ -2115,8 +2421,7 @@ def debug_dataset(train_dataset, show_input_ids=False):
 
         epoch += 1
 
-
-def glob_images(directory, base="*"):
+def glob_images(directory, base="*", fallback_to_cache=False):
     img_paths = []
     for ext in IMAGE_EXTENSIONS:
         if base == "*":
@@ -2124,6 +2429,15 @@ def glob_images(directory, base="*"):
         else:
             img_paths.extend(glob.glob(glob.escape(os.path.join(directory, base + ext))))
     img_paths = list(set(img_paths))  # 重複を排除
+
+    if fallback_to_cache and len(img_paths) == 0:
+        print(f"No images found in {directory}. Will look for cached latents instead.")
+        if base == "*":
+            img_paths.extend(glob.glob(os.path.join(glob.escape(directory), base + ".npz")))
+        else:
+            img_paths.extend(glob.glob(glob.escape(os.path.join(directory, base + ".npz"))))
+        
+        img_paths = [img_path for img_path in set(img_paths) if not img_path.endswith(TEXT_ENCODER_OUTPUTS_CACHE_SUFFIX)]
     img_paths.sort()
     return img_paths
 
@@ -2216,11 +2530,42 @@ def load_arbitrary_dataset(args, tokenizer) -> MinimalDataset:
 
 def load_image(image_path):
     image = Image.open(image_path)
-    if not image.mode == "RGB":
-        image = image.convert("RGB")
+    if not image.mode == "RGBA":
+        image = image.convert("RGBA")    
     img = np.array(image, np.uint8)
+    img[..., -1] = load_mask(image_path, img.shape[:2])
     return img
 
+
+def load_mask(image_path, target_shape):
+    p = pathlib.Path(image_path)
+    mask_path = os.path.join(p.parent, 'mask', p.stem + '.png')
+    result = None
+
+    if os.path.exists(mask_path):
+        try:
+            mask_img = Image.open(mask_path)
+            mask = np.array(mask_img)
+            if len(mask.shape) > 2 and mask.max() <= 255:
+                result = np.array(mask_img.convert("L"))
+            elif len(mask.shape) == 2 and mask.max() > 255:
+                result = mask // (((2 ** 16) - 1) // 255)
+            elif len(mask.shape) == 2 and mask.max() <= 255:
+                result = mask
+            else:
+                print(f"{mask_path} has invalid mask format: using default mask")
+        except:
+            print(f"failed to load mask: {mask_path}")
+
+    # use default when mask file is unavailable
+    if result is None:
+        result = np.full(target_shape, 255, np.uint8)
+
+    # stretch mask to image shape
+    if result.shape != target_shape:
+        result = cv2.resize(result, dsize=target_shape, interpolation=cv2.INTER_LINEAR)
+
+    return result
 
 # 画像を読み込む。戻り値はnumpy.ndarray,(original width, original height),(crop left, crop top, crop right, crop bottom)
 def trim_and_resize_if_required(
@@ -2256,7 +2601,7 @@ def trim_and_resize_if_required(
 
 
 def cache_batch_latents(
-    vae: AutoencoderKL, cache_to_disk: bool, image_infos: List[ImageInfo], flip_aug: bool, random_crop: bool
+    vae: AutoencoderKL, cache_to_disk: bool, image_infos: List[ImageInfo], flip_aug: bool, random_crop: bool, mask_simple_background: bool
 ) -> None:
     r"""
     requires image_infos to have: absolute_path, bucket_reso, resized_size, latents_npz
@@ -2268,12 +2613,32 @@ def cache_batch_latents(
     latents_original_size and latents_crop_ltrb are also set
     """
     images = []
+    masks = []
     for info in image_infos:
         image = load_image(info.absolute_path) if info.image is None else np.array(info.image, np.uint8)
         # TODO 画像のメタデータが壊れていて、メタデータから割り当てたbucketと実際の画像サイズが一致しない場合があるのでチェック追加要
         image, original_size, crop_ltrb = trim_and_resize_if_required(random_crop, image, info.bucket_reso, info.resized_size)
+        # alpha channel contains loss mask, separate it
+        if mask_simple_background:
+            edge_width = max(1, min(image.shape[0], image.shape[1]) // 20)
+            top_edge = image[:edge_width, :, :]
+            bottom_edge = image[-edge_width:, :, :]
+            left_edge = image[:, :edge_width, :].reshape(-1, image.shape[2])
+            right_edge = image[:, -edge_width:, :].reshape(-1, image.shape[2])
+            edges = np.concatenate([top_edge.reshape(-1, image.shape[2]), 
+                                    bottom_edge.reshape(-1, image.shape[2]),
+                                    left_edge, right_edge])
+            colors, counts = np.unique(edges, axis=0, return_counts=True)
+            simple_color = colors[counts.argmax()]
+            simple_color_ratio = counts.max() / counts.sum()
+            if simple_color_ratio > 0.3:
+                simple_color_mask = np.all(image[:, :, :-1] == simple_color[:3], axis=2)
+                image[simple_color_mask, -1] = 0
+        mask = image[:, :, -1] / 255
+        image = image[:, :, :3]
         image = IMAGE_TRANSFORMS(image)
         images.append(image)
+        masks.append(mask)
 
         info.latents_original_size = original_size
         info.latents_crop_ltrb = crop_ltrb
@@ -2291,17 +2656,19 @@ def cache_batch_latents(
     else:
         flipped_latents = [None] * len(latents)
 
-    for info, latent, flipped_latent in zip(image_infos, latents, flipped_latents):
+    for info, latent, flipped_latent, mask in zip(image_infos, latents, flipped_latents, masks):
         # check NaN
         if torch.isnan(latents).any() or (flipped_latent is not None and torch.isnan(flipped_latent).any()):
             raise RuntimeError(f"NaN detected in latents: {info.absolute_path}")
 
         if cache_to_disk:
-            save_latents_to_disk(info.latents_npz, latent, info.latents_original_size, info.latents_crop_ltrb, flipped_latent)
+            save_latents_to_disk(info.latents_npz, latent, info.latents_original_size, info.latents_crop_ltrb, flipped_latent, mask)
         else:
             info.latents = latent
+            info.mask = mask
             if flip_aug:
                 info.latents_flipped = flipped_latent
+                info.mask_flipped = mask.flip(mask, dims=[3])
 
     if not HIGH_VRAM:
         clean_memory_on_device(vae.device)
@@ -2342,7 +2709,7 @@ def cache_batch_text_encoder_outputs(
 def save_text_encoder_outputs_to_disk(npz_path, hidden_state1, hidden_state2, pool2):
     np.savez(
         npz_path,
-        hidden_state1=hidden_state1.cpu().float().numpy(),
+        hidden_state1=hidden_state1.cpu().float().numpy() if hidden_state1 is not None else None,
         hidden_state2=hidden_state2.cpu().float().numpy(),
         pool2=pool2.cpu().float().numpy(),
     )
@@ -2698,6 +3065,14 @@ def get_sai_model_spec(
     return metadata
 
 
+def add_tokenizer_arguments(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--tokenizer_cache_dir",
+        type=str,
+        default=None,
+        help="directory for caching Tokenizer (for offline training) / Tokenizerをキャッシュするディレクトリ（ネット接続なしでの学習のため）",
+    )
+
 def add_sd_models_arguments(parser: argparse.ArgumentParser):
     # for pretrained models
     parser.add_argument(
@@ -2712,12 +3087,7 @@ def add_sd_models_arguments(parser: argparse.ArgumentParser):
         default=None,
         help="pretrained model to train, directory to Diffusers model or StableDiffusion checkpoint / 学習元モデル、Diffusers形式モデルのディレクトリまたはStableDiffusionのckptファイル",
     )
-    parser.add_argument(
-        "--tokenizer_cache_dir",
-        type=str,
-        default=None,
-        help="directory for caching Tokenizer (for offline training) / Tokenizerをキャッシュするディレクトリ（ネット接続なしでの学習のため）",
-    )
+    add_tokenizer_arguments(parser)
 
 
 def add_optimizer_arguments(parser: argparse.ArgumentParser):
@@ -2769,7 +3139,7 @@ def add_optimizer_arguments(parser: argparse.ArgumentParser):
         "--lr_scheduler",
         type=str,
         default="constant",
-        help="scheduler to use for learning rate / 学習率のスケジューラ: linear, cosine, cosine_with_restarts, polynomial, constant (default), constant_with_warmup, adafactor",
+        help="scheduler to use for learning rate / 学習率のスケジューラ: linear, cosine, cosine_with_restarts, polynomial, constant (default), constant_with_warmup, adafactor, rex",
     )
     parser.add_argument(
         "--lr_warmup_steps",
@@ -3087,6 +3457,18 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         default=None,
         help="set maximum time step for U-Net training (1~1000, default is 1000) / U-Net学習時のtime stepの最大値を設定する（1~1000で指定、省略時はデフォルト値(1000)）",
     )
+    parser.add_argument(
+        "--todo_factor",
+        type=float,
+        nargs="+",
+        help="token downsampling (ToDo) factor > 1 (recommend around 2-4). SD1/2 accepts up to 2 values (for depth_1 and depth_2)",
+    )
+    parser.add_argument(
+        "--todo_args",
+        type=str,
+        nargs="*",
+        help='additional arguments for ToDo (like "downsample_factor_depth_2=2")',
+    )
 
     parser.add_argument(
         "--lowram",
@@ -3156,6 +3538,78 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--output_config", action="store_true", help="output command line args to given .toml file / 引数を.tomlファイルに出力する"
     )
 
+    parser.add_argument(
+        "--enable_ema",
+        action="store_true", 
+        help="Enable EMA "
+    )
+    parser.add_argument(
+        "--ema_type", 
+        type=str,
+        default="post-hoc", 
+        choices=["post-hoc"],  # ["traditional","post-hoc"]
+        help="'traditional' = traditional EMA \
+        'post-hoc' = karras EMA. It saves multiple snaphots and allows to reconstruct different EMA profiles after training ",
+    )
+    #parser.add_argument(
+    #    "--ema_k_sigma_rel_1",
+    #    type=float,
+    #    default=0.05,
+    #    help="Averaging length for karras EMA profile.  0 < sigma_rel < 0.28 ",
+    #)
+    #parser.add_argument(
+    #    "--ema_k_sigma_rel_2",
+    #    type=float,
+    #    default=0.1,
+    #    help="Averaging length for karras EMA profile.  0 < sigma_rel < 0.28 ",
+    #)
+    parser.add_argument(
+        "--ema_k_num_snapshots",
+        type=int,
+        default=8,
+        help="Number of saved snapshots. Only for post-hoc ema ",
+    )
+    parser.add_argument(
+        "--ema_beta",
+        type=float,
+        default=0.9999,
+        help="Max ema decay. Only for traditional EMA ",
+    )
+    parser.add_argument(
+        "--ema_karras_beta",
+        action="store_true", 
+        help="use the karras time dependent beta. Only for traditional EMA "
+    )
+    parser.add_argument(
+        "--ema_warmup_power",
+        type=float,
+        default=2/3,
+        help="Only for traditional EMA. If gamma=1 and power=1, implements a simple average. gamma=1, power=2/3 are \
+        good values for models you plan to train for a million or more steps (reaches decay \
+        factor 0.999 at 31.6K steps, 0.9999 at 1M steps), gamma=1, power=3/4 for models \
+        you plan to train for less (reaches decay factor 0.999 at 10K steps, 0.9999 at \
+        215.4k steps). ",
+    )
+    parser.add_argument(
+        "--ema_update_after_step",
+        type=int,
+        default=0,
+        help="EMA warmup steps. Only for traditional EMA. ",
+    )
+    parser.add_argument(
+        "--ema_update_every",
+        type=int,
+        default=10,
+        help="Update EMA every x steps ",
+    )
+    #parser.add_argument(
+    #    "--ema_device",
+    #    type=str,
+    #    default="cpu", 
+    #    help=" "
+    #)
+
+
     # SAI Model spec
     parser.add_argument(
         "--metadata_title",
@@ -3204,19 +3658,21 @@ def verify_training_args(args: argparse.Namespace):
         print("highvram is enabled / highvramが有効です")
         global HIGH_VRAM
         HIGH_VRAM = True
-
-    if args.v_parameterization and not args.v2:
-        logger.warning(
-            "v_parameterization should be with v2 not v1 or sdxl / v1やsdxlでv_parameterizationを使用することは想定されていません"
-        )
-    if args.v2 and args.clip_skip is not None:
-        logger.warning("v2 with clip_skip will be unexpected / v2でclip_skipを使用することは想定されていません")
-
+    
     if args.cache_latents_to_disk and not args.cache_latents:
         args.cache_latents = True
         logger.warning(
             "cache_latents_to_disk is enabled, so cache_latents is also enabled / cache_latents_to_diskが有効なため、cache_latentsを有効にします"
         )
+
+    if not hasattr(args, "v_parameterization"):
+        # Stable Cascade: skip following checks
+        return
+
+    if args.v_parameterization and not args.v2:
+        logger.warning("v_parameterization should be with v2 not v1 or sdxl / v1やsdxlでv_parameterizationを使用することは想定されていません")
+    if args.v2 and args.clip_skip is not None:
+        logger.warning("v2 with clip_skip will be unexpected / v2でclip_skipを使用することは想定されていません")
 
     # noise_offset, perlin_noise, multires_noise_iterations cannot be enabled at the same time
     # # Listを使って数えてもいいけど並べてしまえ
@@ -3285,6 +3741,28 @@ def add_dataset_arguments(
         + " / captionを固定部分と可変部分に分けるためのカスタム区切り文字。この区切り文字より前のトークンはシャッフルされない。指定しない場合、'--keep_tokens'が固定部分のトークン数として使用される。",
     )
     parser.add_argument(
+        "--use_object_template",
+        action="store_true",
+        help="prefix default templates for object for caption text / キャプションは使わずデフォルトの物体用テンプレートで学習する",
+    )
+    parser.add_argument(
+        "--use_style_template",
+        action="store_true",
+        help="prefix default templates for stype for caption text / キャプションは使わずデフォルトのスタイル用テンプレートで学習する",
+    )
+    parser.add_argument(
+        "--secondary_separator",
+        type=str,
+        default=None,
+        help="a secondary separator for caption. This separator is replaced to caption_separator after dropping/shuffling caption"
+        + " / captionのセカンダリ区切り文字。この区切り文字はcaptionのドロップやシャッフル後にcaption_separatorに置き換えられる",
+    )
+    parser.add_argument(
+        "--enable_wildcard",
+        action="store_true",
+        help="enable wildcard for caption (e.g. '{image|picture|rendition}') / captionのワイルドカードを有効にする（例：'{image|picture|rendition}'）",
+    )
+    parser.add_argument(
         "--caption_prefix",
         type=str,
         default=None,
@@ -3296,11 +3774,15 @@ def add_dataset_arguments(
         default=None,
         help="suffix for caption text / captionのテキストの末尾に付ける文字列",
     )
+    parser.add_argument("--color_aug", action="store_true", help="enable weak color augmentation / 学習時に色合いのaugmentationを有効にする")
+    parser.add_argument("--flip_aug", action="store_true", help="enable horizontal flip augmentation / 学習時に左右反転のaugmentationを有効にする")
+    parser.add_argument("--rotate_aug", action="store_true", help="enable rotation augmentation. / 学習時に画像の回転のaugmentationを有効にする")
     parser.add_argument(
-        "--color_aug", action="store_true", help="enable weak color augmentation / 学習時に色合いのaugmentationを有効にする"
-    )
-    parser.add_argument(
-        "--flip_aug", action="store_true", help="enable horizontal flip augmentation / 学習時に左右反転のaugmentationを有効にする"
+        "--keras_aug",
+        type=str,
+        default=None,
+        nargs="*",
+        help='specify Keras image augmentation parameters (e.g., "zoom_range=0.2"). / Kerasでの画像augmentationのパラメータを指定します（例："zoom_range=0.2"）。',
     )
     parser.add_argument(
         "--face_crop_aug_range",
@@ -3357,6 +3839,14 @@ def add_dataset_arguments(
     )
 
     parser.add_argument(
+        "--masked_loss", action="store_true", help="Enable masking of latent loss using grayscale mask images"
+    )
+
+    parser.add_argument(
+        "--mask_simple_background", action="store_true", help="Enable auto-masking of latent loss based on the dominant edge color if it occupies more than 30% of the image edges. This helps in focusing the model on the main content by ignoring simple or uniform background colors such as solid white or black. / 画像の端に占める主要な色が30%以上の場合に基づいて潜在的な損失の自動マスキングを有効にします。これにより、純白または純黒などの単純または均一な背景色を無視して、モデルがメインコンテンツに焦点を合わせるのに役立ちます。"
+    )
+
+    parser.add_argument(
         "--token_warmup_min",
         type=int,
         default=1,
@@ -3367,6 +3857,20 @@ def add_dataset_arguments(
         type=float,
         default=0,
         help="tag length reaches maximum on N steps (or N*max_train_steps if N<1) / N（N<1ならN*max_train_steps）ステップでタグ長が最大になる。デフォルトは0（最初から最大）",
+    )
+
+    parser.add_argument(
+        "--token_decay_min",
+        type=int,
+        default=1,
+        help="minimum number of tokens to reduce to during training. If not specified, the value of token_warmup_min will be used / トレーニング中に減少するトークンの最小数。指定されていない場合は、token_warmup_minの値が使用されます。"
+    )
+
+    parser.add_argument(
+        "--token_decay_step",
+        type=float,
+        default=0,
+        help="step at which token reduction begins (or N*max_train_steps if N<1) / トークン数が減少し始めるステップ（N<1の場合はN*max_train_steps）。"
     )
 
     parser.add_argument(
@@ -3840,6 +4344,31 @@ def get_optimizer(args, trainable_params):
     return optimizer_name, optimizer_args, optimizer
 
 
+def lr_lambda_warmup(warmup_steps: int, lr_lambda: Callable[[int], float]):
+    def warmup(current_step: int):
+        if current_step < warmup_steps:
+            return float(current_step) / float(warmup_steps)
+        else:
+            return lr_lambda(current_step - warmup_steps)
+    return warmup
+
+def lr_lambda_rex(
+        scheduler_steps: int,
+):
+    def lr_lambda(current_step: int):
+        # https://arxiv.org/abs/2107.04197
+        max_lr = 1
+        min_lr = 0.001
+        d = 0.9
+
+        if current_step < scheduler_steps:
+            progress = (current_step / scheduler_steps)
+            div = (1 - d) + (d * (1 - progress))
+            return min_lr + (max_lr - min_lr) * ((1 - progress) / div)
+        else:
+            return min_lr
+    return lr_lambda
+
 # Modified version of get_scheduler() function from diffusers.optimizer.get_scheduler
 # Add some checking and features to the original function.
 
@@ -3887,6 +4416,16 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_processes: int):
         initial_lr = float(name.split(":")[1])
         # logger.info(f"adafactor scheduler init lr {initial_lr}")
         return wrap_check_needless_num_warmup_steps(transformers.optimization.AdafactorSchedule(optimizer, initial_lr))
+
+    if name.upper() == "REX":
+        scheduler_steps = num_training_steps - num_warmup_steps
+        lr_lambda = lr_lambda_rex(scheduler_steps, **lr_scheduler_kwargs)
+        if num_warmup_steps > 0:
+            lr_lambda = lr_lambda_warmup(num_warmup_steps, lr_lambda)
+        return torch.optim.lr_scheduler.LambdaLR(
+                optimizer=optimizer,
+                lr_lambda=lr_lambda,
+        )
 
     name = SchedulerType(name)
     schedule_func = TYPE_TO_SCHEDULER_FUNCTION[name]
@@ -4125,6 +4664,10 @@ def load_target_model(args, weight_dtype, accelerator, unet_use_linear_projectio
 
             clean_memory_on_device(accelerator.device)
         accelerator.wait_for_everyone()
+
+    # apply token merging patch
+    if args.todo_factor:
+        token_merging.patch_attention(unet, args)
 
     return text_encoder, vae, unet, load_stable_diffusion_format
 
@@ -5062,3 +5605,289 @@ class LossRecorder:
     @property
     def moving_average(self) -> float:
         return self.loss_total / len(self.loss_list)
+
+
+# region EMA
+
+
+# based on https://arxiv.org/abs/2312.02696 , https://github.com/cloneofsimo/karras-power-ema-tutorial and  https://github.com/lucidrains/ema-pytorch/blob/main/ema_pytorch/ema_pytorch.py  
+
+#ema_gamma1 = 16.97    #  sigma_rel=0.05
+#ema_gamma2 = 6.94     #  sigma_rel=0.1
+
+def sigma_rel_to_gamma(sigma_rel):
+    t = sigma_rel ** -2
+    gamma = np.roots([1, 7, 16 - t, 12 - t]).real.max()
+    return gamma
+
+def exists(val):
+    return val is not None
+
+def get_module_device(m: torch.nn.Module):
+    return next(m.parameters()).device
+
+def inplace_copy(src: torch.Tensor, tgt: torch.Tensor, *, auto_move_device = False):
+    if auto_move_device:
+        tgt = tgt.to(src.device)
+
+    src.copy_(tgt)
+
+def inplace_lerp(src: torch.Tensor, tgt: torch.Tensor, weight, *, auto_move_device = False):
+    if auto_move_device:
+        tgt = tgt.to(src.device)
+
+    src.lerp_(tgt, weight)
+
+def check_and_update_ema(args, ema, checkpoint_index=0, model_type=None):
+    if model_type == "unet":
+        # TODO
+        # check and save
+        pass
+    ema.update()
+
+def setup_emas(args, model):
+    emas = []
+    if args.ema_type == 'post-hoc':
+        snapshot_every = math.ceil(args.max_train_steps / args.ema_k_num_snapshots)
+        ema1 = EMA(model, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 16.97, post_hoc_snapshot_every = snapshot_every)
+        ema2 = EMA(model, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 6.94, post_hoc_snapshot_every = snapshot_every)
+        emas = [ema1, ema2]
+    return emas
+
+
+class EMA(torch.nn.Module):
+    """
+    Implements exponential moving average shadowing for your model.
+
+    Utilizes an inverse decay schedule to manage longer term training runs.
+    By adjusting the power, you can control how fast EMA will ramp up to your specified beta.
+
+    @crowsonkb's notes on EMA Warmup:
+
+    If gamma=1 and power=1, implements a simple average. gamma=1, power=2/3 are
+    good values for models you plan to train for a million or more steps (reaches decay
+    factor 0.999 at 31.6K steps, 0.9999 at 1M steps), gamma=1, power=3/4 for models
+    you plan to train for less (reaches decay factor 0.999 at 10K steps, 0.9999 at
+    215.4k steps).
+
+    Args:
+        inv_gamma (float): Inverse multiplicative factor of EMA warmup. Default: 1.
+        power (float): Exponential factor of EMA warmup. Default: 2/3.
+        min_value (float): The minimum EMA decay rate. Default: 0.
+    """
+
+    @beartype
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        ema_model: Optional[torch.nn.Module] = None,           # if your model has lazylinears or other types of non-deepcopyable modules, you can pass in your own ema model
+        beta = 0.9999,
+        karras_beta = False,                          # if True, uses the karras time dependent beta
+        update_after_step = 100,
+        update_every = 10,
+        inv_gamma = 1.0,
+        power = 2 / 3,
+        min_value = 0.0,
+        param_or_buffer_names_no_ema: Set[str] = set(),
+        ignore_names: Set[str] = set(),
+        ignore_startswith_names: Set[str] = set(),
+        include_online_model = True,                  # set this to False if you do not wish for the online model to be saved along with the ema model (managed externally)
+        allow_different_devices = False,               # if the EMA model is on a different device (say CPU), automatically move the tensor
+        post_hoc = False,
+        post_hoc_gamma = 16.97,
+        post_hoc_snapshot_every = 1000,
+        sigma_rel = None,
+        model_type = None,
+    ):
+        super().__init__()
+        self._beta = beta
+        self.karras_beta = karras_beta
+
+        self.post_hoc = post_hoc
+        self.post_hoc_gamma = post_hoc_gamma
+        self.post_hoc_snapshot_every = post_hoc_snapshot_every
+
+        self.is_frozen = beta == 1.
+
+        # whether to include the online model within the module tree, so that state_dict also saves it
+
+        self.include_online_model = include_online_model
+
+        if include_online_model:
+            self.online_model = model
+        else:
+            self.online_model = [model] # hack
+
+        # ema model
+
+        self.ema_model = ema_model
+
+        if not exists(self.ema_model):
+            try:
+                self.ema_model = deepcopy(model)
+            except Exception as e:
+                print(f'Error: While trying to deepcopy model: {e}')
+                print('Your model was not copyable. Please make sure you are not using any LazyLinear')
+                exit()
+
+        self.ema_model.requires_grad_(False)
+
+        # parameter and buffer names
+
+        self.parameter_names = {name for name, param in self.ema_model.named_parameters() if param.dtype in [torch.float, torch.float16, torch.bfloat16]}
+        self.buffer_names = {name for name, buffer in self.ema_model.named_buffers() if buffer.dtype in [torch.float, torch.float16, torch.bfloat16]}
+
+        # tensor update functions
+
+        self.inplace_copy = partial(inplace_copy, auto_move_device = allow_different_devices)
+        self.inplace_lerp = partial(inplace_lerp, auto_move_device = allow_different_devices)
+
+        # updating hyperparameters
+
+        self.update_every = update_every
+        self.update_after_step = update_after_step
+
+        self.inv_gamma = inv_gamma
+        self.power = power
+        self.min_value = min_value
+
+        assert isinstance(param_or_buffer_names_no_ema, (set, list))
+        self.param_or_buffer_names_no_ema = param_or_buffer_names_no_ema # parameter or buffer
+
+        self.ignore_names = ignore_names
+        self.ignore_startswith_names = ignore_startswith_names
+
+        # whether to manage if EMA model is kept on a different device
+
+        self.allow_different_devices = allow_different_devices
+
+        # init and step states
+
+        self.register_buffer('initted', torch.tensor(False))
+        self.register_buffer('step', torch.tensor(0))
+
+        if sigma_rel:
+            self.post_hoc_gamma = sigma_rel_to_gamma(sigma_rel)
+
+        if post_hoc:
+            self.karras_beta = True
+            self.power = self.post_hoc_gamma
+            self.register_buffer('ema_gamma', torch.tensor(self.post_hoc_gamma))
+
+    @property
+    def model(self):
+        return self.online_model if self.include_online_model else self.online_model[0]
+    
+    @property
+    def beta(self):
+        if self.karras_beta:
+            return (1 - 1 / (self.step + 1)) ** (1 + self.power)
+
+        return self._beta
+
+    def eval(self):
+        return self.ema_model.eval()
+    
+    def restore_ema_model_device(self):
+        device = self.initted.device
+        self.ema_model.to(device)
+
+    def get_params_iter(self, model):
+        for name, param in model.named_parameters():
+            if name not in self.parameter_names:
+                continue
+            yield name, param
+
+    def get_buffers_iter(self, model):
+        for name, buffer in model.named_buffers():
+            if name not in self.buffer_names:
+                continue
+            yield name, buffer
+
+    def copy_params_from_model_to_ema(self):
+        copy = self.inplace_copy
+
+        for (_, ma_params), (_, current_params) in zip(self.get_params_iter(self.ema_model), self.get_params_iter(self.model)):
+            copy(ma_params.data, current_params.data)
+
+        for (_, ma_buffers), (_, current_buffers) in zip(self.get_buffers_iter(self.ema_model), self.get_buffers_iter(self.model)):
+            copy(ma_buffers.data, current_buffers.data)
+
+    def copy_params_from_ema_to_model(self):
+        copy = self.inplace_copy
+
+        for (_, ma_params), (_, current_params) in zip(self.get_params_iter(self.ema_model), self.get_params_iter(self.model)):
+            copy(current_params.data, ma_params.data)
+
+        for (_, ma_buffers), (_, current_buffers) in zip(self.get_buffers_iter(self.ema_model), self.get_buffers_iter(self.model)):
+            copy(current_buffers.data, ma_buffers.data)
+
+    def get_current_decay(self):
+        if self.post_hoc:
+            return self.beta
+
+        epoch = (self.step - self.update_after_step - 1).clamp(min = 0.)
+        value = 1 - (1 + epoch / self.inv_gamma) ** - self.power
+
+        if epoch.item() <= 0:
+            return 0.
+
+        return value.clamp(min = self.min_value, max = self.beta).item()
+
+    def update(self):
+        step = self.step.item()
+
+        self.step += 1
+
+        if (step % self.update_every) != 0:
+            return
+
+        if step <= self.update_after_step:
+            self.copy_params_from_model_to_ema()
+            return
+
+        if not self.initted.item():
+            self.copy_params_from_model_to_ema()
+            self.initted.data.copy_(torch.tensor(True))
+
+        self.update_moving_average(self.ema_model, self.model)
+
+    @torch.no_grad()
+    def update_moving_average(self, ma_model, current_model):
+        if self.is_frozen:
+            return
+
+        copy, lerp = self.inplace_copy, self.inplace_lerp
+        current_decay = self.get_current_decay()
+
+        for (name, current_params), (_, ma_params) in zip(self.get_params_iter(current_model), self.get_params_iter(ma_model)):
+            if name in self.ignore_names:
+                continue
+
+            if any([name.startswith(prefix) for prefix in self.ignore_startswith_names]):
+                continue
+
+            if name in self.param_or_buffer_names_no_ema:
+                copy(ma_params.data, current_params.data)
+                continue
+
+            lerp(ma_params.data, current_params.data, 1. - current_decay)
+
+        for (name, current_buffer), (_, ma_buffer) in zip(self.get_buffers_iter(current_model), self.get_buffers_iter(ma_model)):
+            if name in self.ignore_names:
+                continue
+
+            if any([name.startswith(prefix) for prefix in self.ignore_startswith_names]):
+                continue
+
+            if name in self.param_or_buffer_names_no_ema:
+                copy(ma_buffer.data, current_buffer.data)
+                continue
+
+            lerp(ma_buffer.data, current_buffer.data, 1. - current_decay)
+
+    def __call__(self, *args, **kwargs):
+        return self.ema_model(*args, **kwargs)
+
+
+# endregion
