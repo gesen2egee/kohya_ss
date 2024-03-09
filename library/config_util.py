@@ -558,8 +558,6 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                 metadata_file: {subset.metadata_file}
             \n"""), "    ")
 
-    logger.info(f"{info}")
-
     print_info(datasets)
 
     if len(val_datasets) > 0:
