@@ -22,11 +22,9 @@ import toml
 import voluptuous
 from voluptuous import (
     Any,
-    All,
     ExactSequence,
     MultipleInvalid,
     Object,
-    Length,
     Required,
     Schema,
 )
@@ -62,26 +60,17 @@ class BaseSubsetParams:
     caption_separator: str = (",",)
     keep_tokens: int = 0
     keep_tokens_separator: str = (None,)
-    use_object_template: bool = False
-    use_style_template: bool = False 
-    secondary_separator: Optional[str] = None
-    enable_wildcard: bool = False
     color_aug: bool = False
     flip_aug: bool = False
-    rotate_aug: bool = False
-    keras_aug: Optional[str] = None       
     face_crop_aug_range: Optional[Tuple[float, float]] = None
     random_crop: bool = False
-    mask_simple_background: bool = False
     caption_prefix: Optional[str] = None
     caption_suffix: Optional[str] = None
     caption_dropout_rate: float = 0.0
     caption_dropout_every_n_epochs: int = 0
-    caption_tag_dropout_rate: float = 0.0   
+    caption_tag_dropout_rate: float = 0.0
     token_warmup_min: int = 1
     token_warmup_step: float = 0
-    token_decay_min: int = 1
-    token_decay_step: float = 0
 
 
 @dataclass
@@ -187,22 +176,13 @@ class ConfigSanitizer:
         "color_aug": bool,
         "face_crop_aug_range": functools.partial(__validate_and_convert_twodim.__func__, float),
         "flip_aug": bool,
-        "rotate_aug": bool,
-        "keras_aug": Any(None, All([str])),
         "num_repeats": int,
         "random_crop": bool,
-        "mask_simple_background": bool,
         "shuffle_caption": bool,
         "keep_tokens": int,
         "keep_tokens_separator": str,
-        "use_object_template": bool,
-        "use_style_template": bool,
-        "secondary_separator": str,
-        "enable_wildcard": bool,
         "token_warmup_min": int,
         "token_warmup_step": Any(float, int),
-        "token_decay_min": int,
-        "token_decay_step": Any(float, int),
         "caption_prefix": str,
         "caption_suffix": str,
     }
@@ -529,32 +509,22 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
         for j, subset in enumerate(dataset.subsets):
             info += indent(dedent(f"""\
                 [Subset {j} of Dataset {i}]
-                  image_dir: "{subset.image_dir}"
-                  image_count: {subset.img_count}
-                  num_repeats: {subset.num_repeats}
-                  shuffle_caption: {subset.shuffle_caption}
-                  keep_tokens: {subset.keep_tokens}
-                  keep_tokens_separator: {subset.keep_tokens_separator}
-                  use_object_template: bool = {subset.use_object_template}
-                  use_style_template: bool = {subset.use_style_template}
-                  secondary_separator: {subset.secondary_separator}
-                  enable_wildcard: {subset.enable_wildcard}
-                  caption_dropout_rate: {subset.caption_dropout_rate}
-                  caption_dropout_every_n_epoches: {subset.caption_dropout_every_n_epochs}
-                  caption_tag_dropout_rate: {subset.caption_tag_dropout_rate}
-                  caption_prefix: {subset.caption_prefix}
-                  caption_suffix: {subset.caption_suffix}
-                  color_aug: {subset.color_aug}
-                  flip_aug: {subset.flip_aug}
-                  rotate_aug: {subset.rotate_aug}   
-                  keras_aug: {subset.keras_aug}
-                  face_crop_aug_range: {subset.face_crop_aug_range}
-                  random_crop: {subset.random_crop}
-                  mask_simple_background: {subset.mask_simple_background}          
-                  token_warmup_min: {subset.token_warmup_min},
-                  token_warmup_step: {subset.token_warmup_step},
-                  token_decay_min: {subset.token_decay_min},
-                  token_decay_step: {subset.token_decay_step},
+                image_dir: "{subset.image_dir}"
+                image_count: {subset.img_count}
+                num_repeats: {subset.num_repeats}
+                shuffle_caption: {subset.shuffle_caption}
+                keep_tokens: {subset.keep_tokens}
+                caption_dropout_rate: {subset.caption_dropout_rate}
+                caption_dropout_every_n_epoches: {subset.caption_dropout_every_n_epochs}
+                caption_tag_dropout_rate: {subset.caption_tag_dropout_rate}
+                caption_prefix: {subset.caption_prefix}
+                caption_suffix: {subset.caption_suffix}
+                color_aug: {subset.color_aug}
+                flip_aug: {subset.flip_aug}
+                face_crop_aug_range: {subset.face_crop_aug_range}
+                random_crop: {subset.random_crop}
+                token_warmup_min: {subset.token_warmup_min},
+                token_warmup_step: {subset.token_warmup_step},
             """), "  ")
 
         if is_dreambooth:
