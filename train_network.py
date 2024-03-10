@@ -45,6 +45,7 @@ from library.utils import setup_logging, add_logging_arguments
 
 setup_logging()
 import logging
+import itertools
 
 logger = logging.getLogger(__name__)
 
@@ -439,6 +440,7 @@ class NetworkTrainer:
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
         )
+        cyclic_val_dataloader = itertools.cycle(val_dataloader)
 
         # 学習ステップ数を計算する
         if args.max_train_epochs is not None:
@@ -1006,8 +1008,9 @@ class NetworkTrainer:
                             print("Validating バリデーション処理...")
                             total_loss = 0.0
                             with torch.no_grad():
-                                for val_step in range(args.validation_batches):
+                                for val_step in min(len(val_dataloader), args.validation_batches):
                                     is_train = False
+                                    batch = next(cyclic_val_dataloader)
                                     loss = self.process_val_batch(batch, is_train, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
                                     total_loss += loss.detach().item()
                                 current_loss = total_loss / args.validation_batches   
@@ -1015,7 +1018,7 @@ class NetworkTrainer:
 
                             if args.logging_dir is not None:
                                 avr_loss: float = val_loss_recorder.moving_average
-                                logs = {"val_loss/avr_loss": avr_loss}
+                                logs = {"loss/avr_val_loss": avr_loss}
                                 accelerator.log(logs, step=global_step)
                                 
                 if global_step >= args.max_train_steps:
@@ -1030,8 +1033,9 @@ class NetworkTrainer:
                     print("Validating バリデーション処理...")
                     total_loss = 0.0
                     with torch.no_grad():
-                        for val_step in range(args.validation_batches):
+                        for val_step in min(len(val_dataloader), args.validation_batches):
                             is_train = False
+                            batch = next(cyclic_val_dataloader)
                             loss = self.process_val_batch(batch, is_train, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
                             total_loss += loss.detach().item()
                         current_loss = total_loss / args.validation_batches   
@@ -1039,7 +1043,7 @@ class NetworkTrainer:
 
                     if args.logging_dir is not None:
                         avr_loss: float = val_loss_recorder.moving_average
-                        logs = {"val_loss/epoch_average": avr_loss}
+                        logs = {"loss/val_epoch_average": avr_loss}
                         accelerator.log(logs, step=epoch + 1)
                             
             accelerator.wait_for_everyone()
@@ -1071,7 +1075,7 @@ class NetworkTrainer:
 
         accelerator.end_training()
 
-        if is_main_process and args.save_state:
+        if is_main_process and args.save_state :
             train_util.save_state_on_train_end(args, accelerator)
 
         if is_main_process:
