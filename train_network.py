@@ -1007,16 +1007,16 @@ class NetworkTrainer:
 
                             with torch.no_grad():
                                 for val_step, batch in enumerate(val_dataloader):
-                                is_train = False
-                                loss = self.process_val_batch(batch, is_train, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+                                    is_train = False
+                                    loss = self.process_val_batch(batch, is_train, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
 
-                                current_loss = loss.detach().item()
-                                val_loss_recorder.add(epoch=epoch, step=global_step, loss=current_loss)
+                                    current_loss = loss.detach().item()
+                                    val_loss_recorder.add(epoch=epoch, step=global_step, loss=current_loss)
 
-                                if args.logging_dir is not None:
-                                    avr_loss: float = val_loss_recorder.moving_average
-                                    logs = {"val_loss/avr_loss": avr_loss}
-                                    accelerator.log(logs, step=global_step)
+                                    if args.logging_dir is not None:
+                                        avr_loss: float = val_loss_recorder.moving_average
+                                        logs = {"val_loss/avr_loss": avr_loss}
+                                        accelerator.log(logs, step=global_step)
                                 
                 if global_step >= args.max_train_steps:
                     break
@@ -1031,16 +1031,16 @@ class NetworkTrainer:
 
                     with torch.no_grad():
                         for val_step, batch in enumerate(val_dataloader):
-                        is_train = False
-                        loss = self.process_val_batch(batch, is_train, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
+                            is_train = False
+                            loss = self.process_val_batch(batch, is_train, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
 
-                        current_loss = loss.detach().item()
-                        val_loss_recorder.add(epoch=epoch, step=global_step, loss=current_loss)
+                            current_loss = loss.detach().item()
+                            val_loss_recorder.add(epoch=epoch, step=global_step, loss=current_loss)
 
-                        if args.logging_dir is not None:
-                            avr_loss: float = val_loss_recorder.moving_average
-                            logs = {"val_loss/epoch_average": avr_loss}
-                            accelerator.log(logs, step=epoch + 1)
+                            if args.logging_dir is not None:
+                                avr_loss: float = val_loss_recorder.moving_average
+                                logs = {"val_loss/epoch_average": avr_loss}
+                                accelerator.log(logs, step=epoch + 1)
                             
             accelerator.wait_for_everyone()
 
