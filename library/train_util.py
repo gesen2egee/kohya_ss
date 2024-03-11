@@ -1189,12 +1189,6 @@ class BaseDataset(torch.utils.data.Dataset):
             image_info = self.image_data[image_key]
             subset = self.image_to_subset[image_key]
             sample_weight = 1.0
-            sample_weight_path = os.path.splitext(info.absolute_path)[0] + ".weight"
-            try:
-                with open(sample_weight_path, 'r', encoding='utf-8') as file:
-                    sample_weight = float(file.readline().strip())
-            except (OSError, ValueError):
-                pass
             loss_weights.append(sample_weight * (self.prior_loss_weight if image_info.is_reg else 1.0))  # in case of fine tuning, is_reg is always False
 
             flipped = subset.flip_aug and random.random() < 0.5  # not flipped or flipped with 50% chance
