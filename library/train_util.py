@@ -1505,7 +1505,7 @@ class DreamBoothDataset(BaseDataset):
                 return [], []
 
             img_paths = glob_images(subset.image_dir, "*")
-            if self.validation_split > 0.0 and subset.is_reg is False:
+            if self.validation_split > 0.0:
                 img_paths = split_train_val(img_paths, self.is_train, self.validation_split, self.validation_seed)            
             logger.info(f"found directory {subset.image_dir} contains {len(img_paths)} image files")
 
