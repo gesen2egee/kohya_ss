@@ -25,6 +25,8 @@ from library import model_util
 import library.train_util as train_util
 from library.train_util import (
     DreamBoothDataset,
+    EMA,
+    check_and_update_ema,
 )
 import library.config_util as config_util
 from library.config_util import (
@@ -505,6 +507,19 @@ class NetworkTrainer:
         else:
             pass  # if text_encoder is not trained, no need to prepare. and device and dtype are already set
 
+        if args.enable_ema: 
+            if args.ema_type == 'traditional':
+                ema = EMA(network, beta = args.ema_beta, karras_beta = args.ema_karras_beta, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, power = args.ema_warmup_power, include_online_model = False, allow_different_devices = True)
+                emas = [ema]
+            elif args.ema_type == 'post-hoc':
+                snapshot_every = math.floor(args.max_train_steps / args.ema_k_num_snapshots)
+                ema1 = EMA(network, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 16.97, post_hoc_snapshot_every = snapshot_every)
+                ema2 = EMA(network, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 6.94, post_hoc_snapshot_every = snapshot_every)
+                emas = [ema1, ema2]
+            if args.ema_on_gpu:
+                for e in emas:
+                    e.to(device=accelerator.device)
+
         network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
 
         if args.gradient_checkpointing:
@@ -608,6 +623,7 @@ class NetworkTrainer:
             "ss_scale_weight_norms": args.scale_weight_norms,
             "ss_ip_noise_gamma": args.ip_noise_gamma,
             "ss_debiased_estimation": bool(args.debiased_estimation_loss),
+            "ss_enable_ema": bool(args.enable_ema),
         }
 
         if use_user_config:
@@ -957,6 +973,17 @@ class NetworkTrainer:
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
+                    if args.enable_ema:
+                        for i, e in enumerate(emas):
+                            if args.ema_type == "post-hoc" and ((e.step + 1) % e.post_hoc_snapshot_every) == 0 and e.step != 0:
+                                #save snapshot
+                                snapshot_dir = os.path.join(args.output_dir, args.output_name + "_ema_snapshots")
+                                os.makedirs(snapshot_dir, exist_ok=True)
+                                snapshot_name = os.path.join(snapshot_dir, "snapshot_{}_{:09d}_{:.6f}".format(i, e.step, e.post_hoc_gamma))
+                                save_model(snapshot_name + ".safetensors", e.ema_model, global_step, num_train_epochs)
+                            with accelerator.autocast():    # not sure if necessary
+                                check_and_update_ema(args, e, i)
+
                 if args.scale_weight_norms:
                     keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
                         args.scale_weight_norms, accelerator.device
@@ -1085,7 +1112,17 @@ class NetworkTrainer:
             ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
             save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
 
-            logger.info("model saved.")
+            if args.enable_ema and args.ema_type == 'traditional':
+                # save directly
+                ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
+                save_model(os.path.splitext(ckpt_name)[0] + "-EMA" + os.path.splitext(ckpt_name)[1], emas[0].ema_model, global_step, num_train_epochs, force_sync_upload=True)
+
+                ## save EMA - copy and save
+                #emas[0].copy_params_from_ema_to_model()
+                #ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
+                #save_model(os.path.splitext(ckpt_name)[0] + "-EMA_" + os.path.splitext(ckpt_name)[1], network, global_step, num_train_epochs, force_sync_upload=True)
+
+            print("model saved.")
 
 
 def setup_parser() -> argparse.ArgumentParser:
