@@ -1006,6 +1006,7 @@ class NetworkTrainer:
                             print("Validating バリデーション処理...")
                             total_loss = 0.0
                             with torch.no_grad():
+                                validation_steps = min(args.validation_batches, len(val_dataloader)) if args.validation_batches is not None                             
                                 for val_step in tqdm(range(validation_steps), desc='Validation Steps'):
                                     is_train = False
                                     batch = next(cyclic_val_dataloader)
