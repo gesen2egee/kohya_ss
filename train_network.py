@@ -1217,12 +1217,6 @@ def setup_parser() -> argparse.ArgumentParser:
         default=1,
         help="Number of val steps for counting validation loss. By default, validation one batch is performed"
     )
-    parser.add_argument(
-        "--validation_batches",
-        type=int,
-        default=None,
-        help="Number of val steps for counting validation loss. By default, validation for all val_dataset is performed"
-    )
     return parser
 
 
