@@ -175,26 +175,26 @@ class NetworkTrainer:
         # Sample noise, sample a random timestep for each image, and add noise to the latents,
         # with noise offset and/or multires noise if specified
         
-        for fixed_timesteps in timesteps_list:
+        for fixed_timesteps in tqdm(timesteps_list, desc='Training Progress'):
             with torch.set_grad_enabled(is_train), accelerator.autocast():
                 noise = torch.randn_like(latents, device=latents.device)
                 b_size = latents.shape[0]
-                timesteps = torch.full((b_size,), fixed_timesteps, dtype=torch.long, device=latents.device)
+                timesteps = torch.randint(fixed_timesteps, fixed_timesteps, (b_size,), device=latents.device)
+                timesteps = timesteps.long()
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                 noise_pred = self.call_unet(
                     args, accelerator, unet, noisy_latents, timesteps, text_encoder_conds, batch, weight_dtype
                 )
-            if args.v_parameterization:
-                # v-parameterization training
-                target = noise_scheduler.get_velocity(latents, noise, timesteps)
-            else:
-                target = noise
+                if args.v_parameterization:
+                    # v-parameterization training
+                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                else:
+                    target = noise
 
-            loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
-            loss = loss.mean([1, 2, 3])
-            loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
-            total_loss += loss
-            
+                loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
+                loss = loss.mean([1, 2, 3])
+                loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
+                total_loss += loss            
         average_loss = total_loss / len(timesteps_list)    
         return average_loss
 
@@ -1012,12 +1012,15 @@ class NetworkTrainer:
                                     batch = next(cyclic_val_dataloader)
                                     loss = self.process_val_batch(batch, is_train, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
                                     total_loss += loss.detach().item()
-                                current_loss = total_loss / args.validation_batches   
-                                val_loss_recorder.add(epoch=epoch, step=global_step, loss=current_loss)
+
+                                current_loss = total_loss / args.validation_batches
+                                val_loss_recorder.add(epoch=epoch, step=global_step, loss=current_loss)   
 
                             if args.logging_dir is not None:
+                                logs = {"loss/current_val_loss": current_loss}
+                                accelerator.log(logs, step=global_step)                            
                                 avr_loss: float = val_loss_recorder.moving_average
-                                logs = {"loss/avr_val_loss": avr_loss}
+                                logs = {"loss/average_val_loss": avr_loss}
                                 accelerator.log(logs, step=global_step)
                                 
                 if global_step >= args.max_train_steps:
@@ -1029,10 +1032,11 @@ class NetworkTrainer:
 
             if args.validation_every_n_step is None:               
                 if len(val_dataloader) > 0:
-                    print("Validating バリデーション処理...")
+                    print(f"\nValidating バリデーション処理...")
                     total_loss = 0.0
                     with torch.no_grad():
-                        for val_step in range(min(len(val_dataloader), args.validation_batches)):
+                        validation_steps = min(args.validation_batches, len(val_dataloader)) if args.validation_batches is not None else len(val_dataloader)
+                        for val_step in range(validation_steps):
                             is_train = False
                             batch = next(cyclic_val_dataloader)
                             loss = self.process_val_batch(batch, is_train, tokenizers, text_encoders, unet, vae, noise_scheduler, vae_dtype, weight_dtype, accelerator, args)
@@ -1042,7 +1046,7 @@ class NetworkTrainer:
 
                     if args.logging_dir is not None:
                         avr_loss: float = val_loss_recorder.moving_average
-                        logs = {"loss/val_epoch_average": avr_loss}
+                        logs = {"loss/epoch_val_average": avr_loss}
                         accelerator.log(logs, step=epoch + 1)
                             
             accelerator.wait_for_everyone()
@@ -1212,6 +1216,12 @@ def setup_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Number of val steps for counting validation loss. By default, validation one batch is performed"
+    )
+    parser.add_argument(
+        "--validation_batches",
+        type=int,
+        default=None,
+        help="Number of val steps for counting validation loss. By default, validation for all val_dataset is performed"
     )
     return parser
 
