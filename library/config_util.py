@@ -463,10 +463,10 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
     datasets: List[Union[DreamBoothDataset, FineTuningDataset, ControlNetDataset]] = []
 
     for dataset_blueprint in dataset_group_blueprint.datasets:
-        if dataset_blueprint.is_controlnet and dataset_blueprint.params.is_reg = True:
+        if dataset_blueprint.is_controlnet and dataset_blueprint.params.is_reg is False:
             subset_klass = ControlNetSubset
             dataset_klass = ControlNetDataset
-        elif dataset_blueprint.is_dreambooth and dataset_blueprint.params.is_reg = True:
+        elif dataset_blueprint.is_dreambooth and dataset_blueprint.params.is_reg is False:
             subset_klass = DreamBoothSubset
             dataset_klass = DreamBoothDataset
         else:
