@@ -482,14 +482,14 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
     for dataset_blueprint in dataset_group_blueprint.datasets:
         if dataset_blueprint.params.validation_split <= 0.0:
             continue
-        if dataset_blueprint.is_controlnet and dataset.is_reg:
+        if dataset_blueprint.is_controlnet and subset.is_reg:
             subset_klass = ControlNetSubset
             dataset_klass = ControlNetDataset
-        elif dataset_blueprint.is_dreambooth and dataset.is_reg:
+        elif dataset_blueprint.is_dreambooth and subset.is_reg:
             subset_klass = DreamBoothSubset
             dataset_klass = DreamBoothDataset
         else:            
-            subset_klass = FineTuningSubset and dataset.is_reg
+            subset_klass = FineTuningSubset and subset.is_reg
             dataset_klass = FineTuningDataset
 
         subsets = [subset_klass(**asdict(subset_blueprint.params)) for subset_blueprint in dataset_blueprint.subsets]
