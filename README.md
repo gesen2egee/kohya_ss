@@ -1,397 +1,165 @@
-# Kohya's GUI
-
-This repository mostly provides a Windows-focused Gradio GUI for [Kohya's Stable Diffusion trainers](https://github.com/kohya-ss/sd-scripts)... but support for Linux OS is also provided through community contributions. Macos is not great at the moment.
-
-The GUI allows you to set the training parameters and generate and run the required CLI commands to train the model.
-
-## Table of Contents
+__SDXL is now supported. The sdxl branch has been merged into the main branch. If you update the repository, please follow the upgrade instructions. Also, the version of accelerate has been updated, so please run accelerate config again.__ The documentation for SDXL training is [here](./README.md#sdxl-training).
 
-- [Kohya's GUI](#kohyas-gui)
-  - [Table of Contents](#table-of-contents)
-  - [🦒 Colab](#-colab)
-  - [Installation](#installation)
-    - [Windows](#windows)
-      - [Windows Pre-requirements](#windows-pre-requirements)
-      - [Setup](#setup)
-      - [Optional: CUDNN 8.6](#optional-cudnn-86)
-    - [Linux and macOS](#linux-and-macos)
-      - [Linux Pre-requirements](#linux-pre-requirements)
-      - [Setup](#setup-1)
-      - [Install Location](#install-location)
-    - [Runpod](#runpod)
-      - [Manual installation](#manual-installation)
-      - [Pre-built Runpod template](#pre-built-runpod-template)
-    - [Docker](#docker)
-      - [Local docker build](#local-docker-build)
-      - [ashleykleynhans runpod docker builds](#ashleykleynhans-runpod-docker-builds)
-  - [Upgrading](#upgrading)
-    - [Windows Upgrade](#windows-upgrade)
-    - [Linux and macOS Upgrade](#linux-and-macos-upgrade)
-  - [Starting GUI Service](#starting-gui-service)
-    - [Launching the GUI on Windows](#launching-the-gui-on-windows)
-    - [Launching the GUI on Linux and macOS](#launching-the-gui-on-linux-and-macos)
-  - [Dreambooth](#dreambooth)
-  - [Finetune](#finetune)
-  - [Train Network](#train-network)
-  - [LoRA](#lora)
-  - [Sample image generation during training](#sample-image-generation-during-training)
-  - [Troubleshooting](#troubleshooting)
-    - [Page File Limit](#page-file-limit)
-    - [No module called tkinter](#no-module-called-tkinter)
-    - [FileNotFoundError](#filenotfounderror)
-  - [SDXL training](#sdxl-training)
-    - [Training scripts for SDXL](#training-scripts-for-sdxl)
-    - [Utility scripts for SDXL](#utility-scripts-for-sdxl)
-    - [Tips for SDXL training](#tips-for-sdxl-training)
-    - [Format of Textual Inversion embeddings for SDXL](#format-of-textual-inversion-embeddings-for-sdxl)
-    - [ControlNet-LLLite](#controlnet-lllite)
-    - [Sample image generation during training](#sample-image-generation-during-training-1)
-  - [Change History](#change-history)
+This repository contains training, generation and utility scripts for Stable Diffusion.
 
-## 🦒 Colab
+[__Change History__](#change-history) is moved to the bottom of the page. 
+更新履歴は[ページ末尾](#change-history)に移しました。
 
-This Colab notebook was not created or maintained by me; however, it appears to function effectively. The source can be found at: https://github.com/camenduru/kohya_ss-colab.
+[日本語版READMEはこちら](./README-ja.md)
 
-I would like to express my gratitude to camendutu for their valuable contribution. If you encounter any issues with the Colab notebook, please report them on their repository.
+For easier use (GUI and PowerShell scripts etc...), please visit [the repository maintained by bmaltais](https://github.com/bmaltais/kohya_ss). Thanks to @bmaltais!
 
-| Colab                                                                                                                                                                          | Info               |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------ |
-| [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/camenduru/kohya_ss-colab/blob/main/kohya_ss_colab.ipynb) | kohya_ss_gui_colab |
+This repository contains the scripts for:
 
-## Installation
+* DreamBooth training, including U-Net and Text Encoder
+* Fine-tuning (native training), including U-Net and Text Encoder
+* LoRA training
+* Textual Inversion training
+* Image generation
+* Model conversion (supports 1.x and 2.x, Stable Diffision ckpt/safetensors and Diffusers)
 
-### Windows
+## About requirements.txt
 
-#### Windows Pre-requirements
+These files do not contain requirements for PyTorch. Because the versions of them depend on your environment. Please install PyTorch at first (see installation guide below.) 
 
-To install the necessary dependencies on a Windows system, follow these steps:
+The scripts are tested with Pytorch 2.0.1. 1.12.1 is not tested but should work.
 
-1. Install [Python 3.10](https://www.python.org/ftp/python/3.10.9/python-3.10.9-amd64.exe).
-   - During the installation process, ensure that you select the option to add Python to the 'PATH' environment variable.
+## Links to usage documentation
 
-2. Install [Git](https://git-scm.com/download/win).
+Most of the documents are written in Japanese.
 
-3. Install the [Visual Studio 2015, 2017, 2019, and 2022 redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+[English translation by darkstorm2150 is here](https://github.com/darkstorm2150/sd-scripts#links-to-usage-documentation). Thanks to darkstorm2150!
 
-#### Setup
+* [Training guide - common](./docs/train_README-ja.md) : data preparation, options etc... 
+  * [Chinese version](./docs/train_README-zh.md)
+* [Dataset config](./docs/config_README-ja.md) 
+* [DreamBooth training guide](./docs/train_db_README-ja.md)
+* [Step by Step fine-tuning guide](./docs/fine_tune_README_ja.md):
+* [training LoRA](./docs/train_network_README-ja.md)
+* [training Textual Inversion](./docs/train_ti_README-ja.md)
+* [Image generation](./docs/gen_img_README-ja.md)
+* note.com [Model conversion](https://note.com/kohya_ss/n/n374f316fe4ad)
 
-To set up the project, follow these steps:
+## Windows Required Dependencies
 
-1. Open a terminal and navigate to the desired installation directory.
+Python 3.10.6 and Git:
 
-2. Clone the repository by running the following command:
-   ```shell
-   git clone https://github.com/bmaltais/kohya_ss.git
-   ```
+- Python 3.10.6: https://www.python.org/ftp/python/3.10.6/python-3.10.6-amd64.exe
+- git: https://git-scm.com/download/win
 
-3. Change into the `kohya_ss` directory:
-   ```shell
-   cd kohya_ss
-   ```
+Give unrestricted script access to powershell so venv can work:
 
-4. Run the setup script by executing the following command:
-   ```shell
-   .\setup.bat
-   ```
+- Open an administrator powershell window
+- Type `Set-ExecutionPolicy Unrestricted` and answer A
+- Close admin powershell window
 
-   During the accelerate config step use the default values as proposed during the configuration unless you know your hardware demand otherwise. The amount of VRAM on your GPU does not have an impact on the values used.
+## Windows Installation
 
-#### Optional: CUDNN 8.6
-
-The following steps are optional but can improve the learning speed for owners of NVIDIA 30X0/40X0 GPUs. These steps enable larger training batch sizes and faster training speeds.
-
-Please note that the CUDNN 8.6 DLLs needed for this process cannot be hosted on GitHub due to file size limitations. You can download them [here](https://github.com/bmaltais/python-library/raw/main/cudnn_windows.zip) to boost sample generation speed (almost 50% on a 4090 GPU). After downloading the ZIP file, follow the installation steps below:
-
-1. Unzip the downloaded file and place the `cudnn_windows` folder in the root directory of the `kohya_ss` repository.
-
-2. Run .\setup.bat and select the option to install cudnn.
-
-### Linux and macOS
-
-#### Linux Pre-requirements
-
-To install the necessary dependencies on a Linux system, ensure that you fulfill the following requirements:
-
-- Ensure that `venv` support is pre-installed. You can install it on Ubuntu 22.04 using the command:
-  ```shell
-  apt install python3.10-venv
-  ```
-
-- Install the cudNN drivers by following the instructions provided in [this link](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64).
-
-- Make sure you have Python version 3.10.6 or higher (but lower than 3.11.0) installed on your system.
-
-- If you are using WSL2, set the `LD_LIBRARY_PATH` environment variable by executing the following command:
-  ```shell
-  export LD_LIBRARY_PATH=/usr/lib/wsl/lib/
-  ```
-
-#### Setup
-
-To set up the project on Linux or macOS, perform the following steps:
-
-1. Open a terminal and navigate to the desired installation directory.
-
-2. Clone the repository by running the following command:
-   ```shell
-   git clone https://github.com/bmaltais/kohya_ss.git
-   ```
-
-3. Change into the `kohya_ss` directory:
-   ```shell
-   cd kohya_ss
-   ```
-
-4. If you encounter permission issues, make the `setup.sh` script executable by running the following command:
-   ```shell
-   chmod +x ./setup.sh
-   ```
-
-5. Run the setup script by executing the following command:
-   ```shell
-   ./setup.sh
-   ```
-
-   Note: If you need additional options or information about the runpod environment, you can use `setup.sh -h` or `setup.sh --help` to display the help message.
-
-#### Install Location
-
-The default installation location on Linux is the directory where the script is located. If a previous installation is detected in that location, the setup will proceed there. Otherwise, the installation will fall back to `/opt/kohya_ss`. If `/opt` is not writable, the fallback location will be `$HOME/kohya_ss`. Finally, if none of the previous options are viable, the installation will be performed in the current directory.
-
-For macOS and other non-Linux systems, the installation process will attempt to detect the previous installation directory based on where the script is run. If a previous installation is not found, the default location will be `$HOME/kohya_ss`. You can override this behavior by specifying a custom installation directory using the `-d` or `--dir` option when running the setup script.
-
-If you choose to use the interactive mode, the default values for the accelerate configuration screen will be "This machine," "None," and "No" for the remaining questions. These default answers are the same as the Windows installation.
-
-### Runpod
-
-#### Manual installation
-
-To install the necessary components for Runpod and run kohya_ss, follow these steps:
-
-1. Select the Runpod pytorch 2.0.1 template. This is important. Other templates may not work.
-
-2. SSH into the Runpod.
-
-3. Clone the repository by running the following command:
-   ```shell
-   cd /workspace
-   git clone https://github.com/bmaltais/kohya_ss.git
-   ```
-
-4. Run the setup script:
-   ```shell
-   cd kohya_ss
-   ./setup-runpod.sh
-   ```
-
-5. Run the gui with:
-   ```shell
-   ./gui.sh --share --headless
-   ```
-
-   or with this if you expose 7860 directly via the runpod configuration
-
-   ```shell
-   ./gui.sh --listen=0.0.0.0 --headless
-   ```
-
-6. Connect to the public URL displayed after the installation process is completed.
-
-#### Pre-built Runpod template
-
-To run from a pre-built Runpod template you can:
-
-1. Open the Runpod template by clicking on https://runpod.io/gsc?template=ya6013lj5a&ref=w18gds2n
-
-2. Deploy the template on the desired host
-
-3. Once deployed connect to the Runpod on HTTP 3010 to connect to kohya_ss GUI. You can also connect to auto1111 on HTTP 3000.
-
-
-### Docker
-
-#### Local docker build
-
-If you prefer to use Docker, follow the instructions below:
-
-1. Ensure that you have Git and Docker installed on your Windows or Linux system.
-
-2. Open your OS shell (Command Prompt or Terminal) and run the following commands:
-
-   ```bash
-   git clone https://github.com/bmaltais/kohya_ss.git
-   cd kohya_ss
-   docker compose create
-   docker compose build
-   docker compose run --service-ports kohya-ss-gui
-   ```
-
-   Note: The initial run may take up to 20 minutes to complete.
-
-   Please be aware of the following limitations when using Docker:
-
-   - All training data must be placed in the `dataset` subdirectory, as the Docker container cannot access files from other directories.
-   - The file picker feature is not functional. You need to manually set the folder path and config file path.
-   - Dialogs may not work as expected, and it is recommended to use unique file names to avoid conflicts.
-   - There is no built-in auto-update support. To update the system, you must run update scripts outside of Docker and rebuild using `docker compose build`.
-
-   If you are running Linux, an alternative Docker container port with fewer limitations is available [here](https://github.com/P2Enjoy/kohya_ss-docker).
-
-#### ashleykleynhans runpod docker builds
-
-You may want to use the following Dockerfile repos to build the images:
-
-   - Standalone Kohya_ss template: https://github.com/ashleykleynhans/kohya-docker
-   - Auto1111 + Kohya_ss GUI template: https://github.com/ashleykleynhans/stable-diffusion-docker
-
-## Upgrading
-
-To upgrade your installation to a new version, follow the instructions below.
-
-### Windows Upgrade
-
-If a new release becomes available, you can upgrade your repository by running the following commands from the root directory of the project:
-
-1. Pull the latest changes from the repository:
-   ```powershell
-   git pull
-   ```
-
-2. Run the setup script:
-   ```powershell
-   .\setup.bat
-   ```
-
-### Linux and macOS Upgrade
-
-To upgrade your installation on Linux or macOS, follow these steps:
-
-1. Open a terminal and navigate to the root
-
- directory of the project.
-
-2. Pull the latest changes from the repository:
-   ```bash
-   git pull
-   ```
-
-3. Refresh and update everything:
-   ```bash
-   ./setup.sh
-   ```
-
-## Starting GUI Service
-
-To launch the GUI service, you can use the provided scripts or run the `kohya_gui.py` script directly. Use the command line arguments listed below to configure the underlying service.
-
-```text
---listen: Specify the IP address to listen on for connections to Gradio.
---username: Set a username for authentication.
---password: Set a password for authentication.
---server_port: Define the port to run the server listener on.
---inbrowser: Open the Gradio UI in a web browser.
---share: Share the Gradio UI.
---language: Set custom language
-```
-
-### Launching the GUI on Windows
-
-On Windows, you can use either the `gui.ps1` or `gui.bat` script located in the root directory. Choose the script that suits your preference and run it in a terminal, providing the desired command line arguments. Here's an example:
+Open a regular Powershell terminal and type the following inside:
 
 ```powershell
-gui.ps1 --listen 127.0.0.1 --server_port 7860 --inbrowser --share
+git clone https://github.com/kohya-ss/sd-scripts.git
+cd sd-scripts
+
+python -m venv venv
+.\venv\Scripts\activate
+
+pip install torch==2.0.1+cu118 torchvision==0.15.2+cu118 --index-url https://download.pytorch.org/whl/cu118
+pip install --upgrade -r requirements.txt
+pip install xformers==0.0.20
+
+accelerate config
 ```
 
-or
+__Note:__ Now bitsandbytes is optional. Please install any version of bitsandbytes as needed. Installation instructions are in the following section.
+
+<!-- 
+cp .\bitsandbytes_windows\*.dll .\venv\Lib\site-packages\bitsandbytes\
+cp .\bitsandbytes_windows\cextension.py .\venv\Lib\site-packages\bitsandbytes\cextension.py
+cp .\bitsandbytes_windows\main.py .\venv\Lib\site-packages\bitsandbytes\cuda_setup\main.py
+-->
+Answers to accelerate config:
+
+```txt
+- This machine
+- No distributed training
+- NO
+- NO
+- NO
+- all
+- fp16
+```
+
+note: Some user reports ``ValueError: fp16 mixed precision requires a GPU`` is occurred in training. In this case, answer `0` for the 6th question: 
+``What GPU(s) (by id) should be used for training on this machine as a comma-separated list? [all]:`` 
+
+(Single GPU with id `0` will be used.)
+
+### Optional: Use `bitsandbytes` (8bit optimizer)
+
+For 8bit optimizer, you need to install `bitsandbytes`. For Linux, please install `bitsandbytes` as usual (0.41.1 or later is recommended.)
+
+For Windows, there are several versions of `bitsandbytes`:
+
+- `bitsandbytes` 0.35.0: Stable version. AdamW8bit is available. `full_bf16` is not available.
+- `bitsandbytes` 0.41.1: Lion8bit, PagedAdamW8bit and PagedLion8bit are available. `full_bf16` is available.
+
+Note: `bitsandbytes`above 0.35.0 till 0.41.0 seems to have an issue: https://github.com/TimDettmers/bitsandbytes/issues/659
+
+Follow the instructions below to install `bitsandbytes` for Windows.
+
+### bitsandbytes 0.35.0 for Windows
+
+Open a regular Powershell terminal and type the following inside:
 
 ```powershell
-gui.bat --listen 127.0.0.1 --server_port 7860 --inbrowser --share
+cd sd-scripts
+.\venv\Scripts\activate
+pip install bitsandbytes==0.35.0
+
+cp .\bitsandbytes_windows\*.dll .\venv\Lib\site-packages\bitsandbytes\
+cp .\bitsandbytes_windows\cextension.py .\venv\Lib\site-packages\bitsandbytes\cextension.py
+cp .\bitsandbytes_windows\main.py .\venv\Lib\site-packages\bitsandbytes\cuda_setup\main.py
 ```
 
-### Launching the GUI on Linux and macOS
+This will install `bitsandbytes` 0.35.0 and copy the necessary files to the `bitsandbytes` directory.
 
-To launch the GUI on Linux or macOS, run the `gui.sh` script located in the root directory. Provide the desired command line arguments as follows:
+### bitsandbytes 0.41.1 for Windows
 
-```bash
-gui.sh --listen 127.0.0.1 --server_port 7860 --inbrowser --share
+Install the Windows version whl file from [here](https://github.com/jllllll/bitsandbytes-windows-webui) or other sources, like:
+
+```powershell
+python -m pip install bitsandbytes==0.41.1 --prefer-binary --extra-index-url=https://jllllll.github.io/bitsandbytes-windows-webui
 ```
 
-## Dreambooth
+## Upgrade
 
-For specific instructions on using the Dreambooth solution, please refer to the [Dreambooth README](https://github.com/bmaltais/kohya_ss/blob/master/train_db_README.md).
+When a new release comes out you can upgrade your repo with the following command:
 
-## Finetune
-
-For specific instructions on using the Finetune solution, please refer to the [Finetune README](https://github.com/bmaltais/kohya_ss/blob/master/fine_tune_README.md).
-
-## Train Network
-
-For specific instructions on training a network, please refer to the [Train network README](https://github.com/bmaltais/kohya_ss/blob/master/train_network_README.md).
-
-## LoRA
-
-To train a LoRA, you can currently use the `train_network.py` code. You can create a LoRA network by using the all-in-one GUI.
-
-Once you have created the LoRA network, you can generate images using auto1111 by installing [this extension](https://github.com/kohya-ss/sd-webui-additional-networks).
-
-The following are the names of LoRA types used in this repository:
-
-1. LoRA-LierLa: LoRA for Linear layers and Conv2d layers with a 1x1 kernel.
-
-2. LoRA-C3Lier: LoRA for Conv2d layers with a 3x3 kernel, in addition to LoRA-LierLa.
-
-LoRA-LierLa is the default LoRA type for `train_network.py` (without `conv_dim` network argument). You can use LoRA-LierLa with our extension for AUTOMATIC1111's Web UI or the built-in LoRA feature of the Web UI.
-
-To use LoRA-C3Lier with the Web UI, please use our extension.
-
-## Sample image generation during training
-
-A prompt file might look like this, for example:
-
-```
-# prompt 1
-masterpiece, best quality, (1girl), in white shirts, upper body, looking at viewer, simple background --n low quality, worst quality, bad anatomy, bad composition, poor, low effort --w 768 --h 768 --d 1 --l 7.5 --s 28
-
-# prompt 2
-masterpiece, best quality, 1boy, in business suit, standing at street, looking back --n (low quality, worst quality), bad anatomy, bad composition, poor, low effort --w 576 --h 832 --d 2 --l 5.5 --s 40
+```powershell
+cd sd-scripts
+git pull
+.\venv\Scripts\activate
+pip install --use-pep517 --upgrade -r requirements.txt
 ```
 
-Lines beginning with `#` are comments. You can specify options for the generated image with options like `--n` after the prompt. The following options can be used:
+Once the commands have completed successfully you should be ready to use the new version.
 
-- `--n`: Negative prompt up to the next option.
-- `--w`: Specifies the width of the generated image.
-- `--h`: Specifies the height of the generated image.
-- `--d`: Specifies the seed of the generated image.
-- `--l`: Specifies the CFG scale of the generated image.
-- `--s`: Specifies the number of steps in the generation.
+## Credits
 
-The prompt weighting such as `( )` and `[ ]` are working.
+The implementation for LoRA is based on [cloneofsimo's repo](https://github.com/cloneofsimo/lora). Thank you for great work!
 
-## Troubleshooting
+The LoRA expansion to Conv2d 3x3 was initially released by cloneofsimo and its effectiveness was demonstrated at [LoCon](https://github.com/KohakuBlueleaf/LoCon) by KohakuBlueleaf. Thank you so much KohakuBlueleaf!
 
-If you encounter any issues, refer to the troubleshooting steps below.
+## License
 
-### Page File Limit
+The majority of scripts is licensed under ASL 2.0 (including codes from Diffusers, cloneofsimo's and LoCon), however portions of the project are available under separate license terms:
 
-If you encounter an X error related to the page file, you may need to increase the page file size limit in Windows.
+[Memory Efficient Attention Pytorch](https://github.com/lucidrains/memory-efficient-attention-pytorch): MIT
 
-### No module called tkinter
+[bitsandbytes](https://github.com/TimDettmers/bitsandbytes): MIT
 
-If you encounter an error indicating that the module `tkinter` is not found, try reinstalling Python 3.10 on your system.
-
-### FileNotFoundError
-
-If you come across a `FileNotFoundError`, it is likely due to an installation issue. Make sure you do not have any locally installed Python modules that could conflict with the ones installed in the virtual environment. You can uninstall them by following these steps:
-
-1. Open a new PowerShell terminal and ensure that no virtual environment is active.
-
-2. Run the following commands to create a backup file of your locally installed pip packages and then uninstall them:
-   ```powershell
-   pip freeze > uninstall.txt
-   pip uninstall -r uninstall.txt
-   ```
-
-   After uninstalling the local packages, redo the installation steps within the `kohya_ss` virtual environment.
+[BLIP](https://github.com/salesforce/BLIP): BSD-3-Clause
 
 
 ## SDXL training
@@ -402,7 +170,7 @@ The documentation in this section will be moved to a separate document later.
 
 - `sdxl_train.py` is a script for SDXL fine-tuning. The usage is almost the same as `fine_tune.py`, but it also supports DreamBooth dataset.
   - `--full_bf16` option is added. Thanks to KohakuBlueleaf!
-    - This option enables the full bfloat16 training (includes gradients). This option is useful to reduce the GPU memory usage.
+    - This option enables the full bfloat16 training (includes gradients). This option is useful to reduce the GPU memory usage. 
     - The full bfloat16 training might be unstable. Please use it at your own risk.
   - The different learning rates for each U-Net block are now supported in sdxl_train.py. Specify with `--block_lr` option. Specify 23 values separated by commas like `--block_lr 1e-3,1e-3 ... 1e-3`.
     - 23 values correspond to `0: time/label embed, 1-9: input blocks 0-8, 10-12: mid blocks 0-2, 13-21: output blocks 0-8, 22: out`.
@@ -427,13 +195,13 @@ The documentation in this section will be moved to a separate document later.
 
 ### Utility scripts for SDXL
 
-- `tools/cache_latents.py` is added. This script can be used to cache the latents to disk in advance.
+- `tools/cache_latents.py` is added. This script can be used to cache the latents to disk in advance. 
   - The options are almost the same as `sdxl_train.py'. See the help message for the usage.
   - Please launch the script as follows:
     `accelerate launch  --num_cpu_threads_per_process 1 tools/cache_latents.py ...`
   - This script should work with multi-GPU, but it is not tested in my environment.
 
-- `tools/cache_text_encoder_outputs.py` is added. This script can be used to cache the text encoder outputs to disk in advance.
+- `tools/cache_text_encoder_outputs.py` is added. This script can be used to cache the text encoder outputs to disk in advance. 
   - The options are almost the same as `cache_latents.py` and `sdxl_train.py`. See the help message for the usage.
 
 - `sdxl_gen_img.py` is added. This script can be used to generate images with SDXL, including LoRA, Textual Inversion and ControlNet-LLLite. See the help message for the usage.
@@ -457,7 +225,6 @@ The documentation in this section will be moved to a separate document later.
 - `--bucket_reso_steps` can be set to 32 instead of the default value 64. Smaller values than 32 will not work for SDXL training.
 
 Example of the optimizer settings for Adafactor with the fixed learning rate:
-
 ```toml
 optimizer_type = "adafactor"
 optimizer_args = [ "scale_parameter=False", "relative_step=False", "warmup_init=False" ]
@@ -479,7 +246,206 @@ save_file(state_dict, file)
 
 ControlNet-LLLite, a novel method for ControlNet with SDXL, is added. See [documentation](./docs/train_lllite_README.md) for details.
 
-### Sample image generation during training
+
+## Change History
+
+### Working in progress
+
+- Colab seems to stop with log output. Try specifying `--console_log_simple` option in the training script to disable rich logging.
+- `train_network.py` and `sdxl_train_network.py` are modified to record some dataset settings in the metadata of the trained model (`caption_prefix`, `caption_suffix`, `keep_tokens_separator`, `secondary_separator`, `enable_wildcard`).
+- Some features are added to the dataset subset settings.
+  - `secondary_separator` is added to specify the tag separator that is not the target of shuffling or dropping. 
+    - Specify `secondary_separator=";;;"`. When you specify `secondary_separator`, the part is not shuffled or dropped. See the example below.
+  - `enable_wildcard` is added. When set to `true`, the wildcard notation `{aaa|bbb|ccc}` can be used. See the example below.
+  - `keep_tokens_separator` is updated to be used twice in the caption. When you specify `keep_tokens_separator="|||"`, the part divided by the second `|||` is not shuffled or dropped and remains at the end.
+  - The existing features `caption_prefix` and `caption_suffix` can be used together. `caption_prefix` and `caption_suffix` are processed first, and then `enable_wildcard`, `keep_tokens_separator`, shuffling and dropping, and `secondary_separator` are processed in order.
+  - The examples are [shown below](#example-of-dataset-settings--データセット設定の記述例).
+
+
+- Colab での動作時、ログ出力で停止してしまうようです。学習スクリプトに `--console_log_simple` オプションを指定し、rich のロギングを無効してお試しください。
+- `train_network.py` および `sdxl_train_network.py` で、学習したモデルのメタデータに一部のデータセット設定が記録されるよう修正しました（`caption_prefix`、`caption_suffix`、`keep_tokens_separator`、`secondary_separator`、`enable_wildcard`）。
+- データセットのサブセット設定にいくつかの機能を追加しました。
+  - シャッフルの対象とならないタグ分割識別子の指定 `secondary_separator` を追加しました。`secondary_separator=";;;"` のように指定します。`secondary_separator` で区切ることで、その部分はシャッフル、drop 時にまとめて扱われます。詳しくは記述例をご覧ください。
+  - `enable_wildcard` を追加しました。`true` にするとワイルドカード記法 `{aaa|bbb|ccc}` が使えます。詳しくは記述例をご覧ください。
+  - `keep_tokens_separator` をキャプション内に 2 つ使えるようにしました。たとえば `keep_tokens_separator="|||"` と指定したとき、`1girl, hatsune miku, vocaloid ||| stage, mic ||| best quality, rating: general` とキャプションを指定すると、二番目の `|||` で分割された部分はシャッフル、drop されず末尾に残ります。
+  - 既存の機能 `caption_prefix` と `caption_suffix` とあわせて使えます。`caption_prefix` と `caption_suffix` は一番最初に処理され、その後、ワイルドカード、`keep_tokens_separator`、シャッフルおよび drop、`secondary_separator` の順に処理されます。
+
+#### Example of dataset settings / データセット設定の記述例:
+
+```toml
+[general]
+flip_aug = true
+color_aug = false
+resolution = [1024, 1024]
+
+[[datasets]]
+batch_size = 6
+enable_bucket = true
+bucket_no_upscale = true
+caption_extension = ".txt"
+keep_tokens_separator= "|||"
+shuffle_caption = true
+caption_tag_dropout_rate = 0.1
+secondary_separator = ";;;" # subset 側に書くこともできます / can be written in the subset side
+enable_wildcard = true # 同上 / same as above
+
+  [[datasets.subsets]]
+  image_dir = "/path/to/image_dir"
+  num_repeats = 1
+
+  # ||| の前後はカンマは不要です（自動的に追加されます） / No comma is required before and after ||| (it is added automatically)
+  caption_prefix = "1girl, hatsune miku, vocaloid |||" 
+  
+  # ||| の後はシャッフル、drop されず残ります / After |||, it is not shuffled or dropped and remains
+  # 単純に文字列として連結されるので、カンマなどは自分で入れる必要があります / It is simply concatenated as a string, so you need to put commas yourself
+  caption_suffix = ", anime screencap ||| masterpiece, rating: general"
+```
+
+#### Example of caption, secondary_separator notation: `secondary_separator = ";;;"`
+
+```txt
+1girl, hatsune miku, vocaloid, upper body, looking at viewer, sky;;;cloud;;;day, outdoors
+```
+The part `sky;;;cloud;;;day` is replaced with `sky,cloud,day` without shuffling or dropping. When shuffling and dropping are enabled, it is processed as a whole (as one tag). For example, it becomes `vocaloid, 1girl, upper body, sky,cloud,day, outdoors, hatsune miku` (shuffled) or `vocaloid, 1girl, outdoors, looking at viewer, upper body, hatsune miku` (dropped).
+
+#### Example of caption, enable_wildcard notation: `enable_wildcard = true`
+
+```txt
+1girl, hatsune miku, vocaloid, upper body, looking at viewer, {simple|white} background
+```
+`simple` or `white` is randomly selected, and it becomes `simple background` or `white background`.
+
+```txt
+1girl, hatsune miku, vocaloid, {{retro style}}
+```
+If you want to include `{` or `}` in the tag string, double them like `{{` or `}}` (in this example, the actual caption used for training is `{retro style}`).
+
+#### Example of caption, `keep_tokens_separator` notation: `keep_tokens_separator = "|||"`
+
+```txt
+1girl, hatsune miku, vocaloid ||| stage, microphone, white shirt, smile ||| best quality, rating: general
+```
+It becomes `1girl, hatsune miku, vocaloid, microphone, stage, white shirt, best quality, rating: general` or `1girl, hatsune miku, vocaloid, white shirt, smile, stage, microphone, best quality, rating: general` etc.
+
+
+#### キャプション記述例、secondary_separator 記法：`secondary_separator = ";;;"` の場合
+
+```txt
+1girl, hatsune miku, vocaloid, upper body, looking at viewer, sky;;;cloud;;;day, outdoors
+```
+`sky;;;cloud;;;day` の部分はシャッフル、drop されず `sky,cloud,day` に置換されます。シャッフル、drop が有効な場合、まとめて（一つのタグとして）処理されます。つまり `vocaloid, 1girl, upper body, sky,cloud,day, outdoors, hatsune miku` （シャッフル）や `vocaloid, 1girl, outdoors, looking at viewer, upper body, hatsune miku` （drop されたケース）などになります。
+
+#### キャプション記述例、ワイルドカード記法： `enable_wildcard = true` の場合
+
+```txt
+1girl, hatsune miku, vocaloid, upper body, looking at viewer, {simple|white} background
+```
+ランダムに `simple` または `white` が選ばれ、`simple background` または `white background` になります。
+
+```txt
+1girl, hatsune miku, vocaloid, {{retro style}}
+```
+タグ文字列に `{` や `}` そのものを含めたい場合は `{{` や `}}` のように二つ重ねてください（この例では実際に学習に用いられるキャプションは `{retro style}` になります）。
+
+#### キャプション記述例、`keep_tokens_separator` 記法： `keep_tokens_separator = "|||"` の場合
+
+```txt
+1girl, hatsune miku, vocaloid ||| stage, microphone, white shirt, smile ||| best quality, rating: general
+```
+`1girl, hatsune miku, vocaloid, microphone, stage, white shirt, best quality, rating: general` や `1girl, hatsune miku, vocaloid, white shirt, smile, stage, microphone, best quality, rating: general` などになります。
+
+
+### Feb 24, 2024 / 2024/2/24: v0.8.4
+
+- The log output has been improved. PR [#905](https://github.com/kohya-ss/sd-scripts/pull/905) Thanks to shirayu!
+  - The log is formatted by default. The `rich` library is required. Please see [Upgrade](#upgrade) and update the library.
+  - If `rich` is not installed, the log output will be the same as before.
+  - The following options are available in each training script:
+  - `--console_log_simple` option can be used to switch to the previous log output.
+  - `--console_log_level` option can be used to specify the log level. The default is `INFO`.
+  - `--console_log_file` option can be used to output the log to a file. The default is `None` (output to the console).
+- The sample image generation during multi-GPU training is now done with multiple GPUs. PR [#1061](https://github.com/kohya-ss/sd-scripts/pull/1061) Thanks to DKnight54!
+- The support for mps devices is improved. PR [#1054](https://github.com/kohya-ss/sd-scripts/pull/1054) Thanks to akx! If mps device exists instead of CUDA, the mps device is used automatically.
+- The `--new_conv_rank` option to specify the new rank of Conv2d is added to `networks/resize_lora.py`. PR [#1102](https://github.com/kohya-ss/sd-scripts/pull/1102) Thanks to mgz-dev!
+- An option `--highvram` to disable the optimization for environments with little VRAM is added to the training scripts. If you specify it when there is enough VRAM, the operation will be faster.
+  - Currently, only the cache part of latents is optimized.
+- The IPEX support is improved. PR [#1086](https://github.com/kohya-ss/sd-scripts/pull/1086) Thanks to Disty0!
+- Fixed a bug that `svd_merge_lora.py` crashes in some cases. PR [#1087](https://github.com/kohya-ss/sd-scripts/pull/1087) Thanks to mgz-dev!
+- DyLoRA is fixed to work with SDXL. PR [#1126](https://github.com/kohya-ss/sd-scripts/pull/1126) Thanks to tamlog06!
+- The common image generation script `gen_img.py` for SD 1/2 and SDXL is added. The basic functions are the same as the scripts for SD 1/2 and SDXL, but some new features are added.
+  - External scripts to generate prompts can be supported. It can be called with `--from_module` option. (The documentation will be added later)
+  - The normalization method after prompt weighting can be specified with `--emb_normalize_mode` option. `original` is the original method, `abs` is the normalization with the average of the absolute values, `none` is no normalization.
+- Gradual Latent Hires fix is added to each generation script. See [here](./docs/gen_img_README-ja.md#about-gradual-latent) for details.
+
+- ログ出力が改善されました。 PR [#905](https://github.com/kohya-ss/sd-scripts/pull/905) shirayu 氏に感謝します。
+  - デフォルトでログが成形されます。`rich` ライブラリが必要なため、[Upgrade](#upgrade) を参照し更新をお願いします。
+  - `rich` がインストールされていない場合は、従来のログ出力になります。
+  - 各学習スクリプトでは以下のオプションが有効です。
+  - `--console_log_simple` オプションで従来のログ出力に切り替えられます。
+  - `--console_log_level` でログレベルを指定できます。デフォルトは `INFO` です。
+  - `--console_log_file` でログファイルを出力できます。デフォルトは `None`（コンソールに出力） です。
+- 複数 GPU 学習時に学習中のサンプル画像生成を複数 GPU で行うようになりました。 PR [#1061](https://github.com/kohya-ss/sd-scripts/pull/1061) DKnight54 氏に感謝します。
+- mps デバイスのサポートが改善されました。 PR [#1054](https://github.com/kohya-ss/sd-scripts/pull/1054) akx 氏に感謝します。CUDA ではなく mps が存在する場合には自動的に mps デバイスを使用します。
+- `networks/resize_lora.py` に Conv2d の新しいランクを指定するオプション `--new_conv_rank` が追加されました。 PR [#1102](https://github.com/kohya-ss/sd-scripts/pull/1102) mgz-dev 氏に感謝します。
+- 学習スクリプトに VRAMが少ない環境向け最適化を無効にするオプション `--highvram` を追加しました。VRAM に余裕がある場合に指定すると動作が高速化されます。
+  - 現在は latents のキャッシュ部分のみ高速化されます。
+- IPEX サポートが改善されました。 PR [#1086](https://github.com/kohya-ss/sd-scripts/pull/1086) Disty0 氏に感謝します。
+- `svd_merge_lora.py` が場合によってエラーになる不具合が修正されました。 PR [#1087](https://github.com/kohya-ss/sd-scripts/pull/1087) mgz-dev 氏に感謝します。
+- DyLoRA が SDXL で動くよう修正されました。PR [#1126](https://github.com/kohya-ss/sd-scripts/pull/1126) tamlog06 氏に感謝します。
+- SD 1/2 および SDXL 共通の生成スクリプト `gen_img.py` を追加しました。基本的な機能は SD 1/2、SDXL 向けスクリプトと同じですが、いくつかの新機能が追加されています。
+  - プロンプトを動的に生成する外部スクリプトをサポートしました。 `--from_module` で呼び出せます。（ドキュメントはのちほど追加します）
+  - プロンプト重みづけ後の正規化方法を `--emb_normalize_mode` で指定できます。`original` は元の方法、`abs` は絶対値の平均値で正規化、`none` は正規化を行いません。
+- Gradual Latent Hires fix を各生成スクリプトに追加しました。詳細は [こちら](./docs/gen_img_README-ja.md#about-gradual-latent)。
+
+
+### Jan 27, 2024 / 2024/1/27: v0.8.3
+
+- Fixed a bug that the training crashes when `--fp8_base` is specified with `--save_state`. PR [#1079](https://github.com/kohya-ss/sd-scripts/pull/1079) Thanks to feffy380!
+  - `safetensors` is updated. Please see [Upgrade](#upgrade) and update the library.
+- Fixed a bug that the training crashes when `network_multiplier` is specified with multi-GPU training. PR [#1084](https://github.com/kohya-ss/sd-scripts/pull/1084) Thanks to fireicewolf!
+- Fixed a bug that the training crashes when training ControlNet-LLLite.
+
+- `--fp8_base` 指定時に `--save_state` での保存がエラーになる不具合が修正されました。 PR [#1079](https://github.com/kohya-ss/sd-scripts/pull/1079) feffy380 氏に感謝します。
+  - `safetensors` がバージョンアップされていますので、[Upgrade](#upgrade) を参照し更新をお願いします。
+- 複数 GPU での学習時に `network_multiplier` を指定するとクラッシュする不具合が修正されました。 PR [#1084](https://github.com/kohya-ss/sd-scripts/pull/1084) fireicewolf 氏に感謝します。
+- ControlNet-LLLite の学習がエラーになる不具合を修正しました。 
+
+Please read [Releases](https://github.com/kohya-ss/sd-scripts/releases) for recent updates.
+最近の更新情報は [Release](https://github.com/kohya-ss/sd-scripts/releases) をご覧ください。
+
+### Naming of LoRA
+
+The LoRA supported by `train_network.py` has been named to avoid confusion. The documentation has been updated. The following are the names of LoRA types in this repository.
+
+1. __LoRA-LierLa__ : (LoRA for __Li__ n __e__ a __r__  __La__ yers)
+
+    LoRA for Linear layers and Conv2d layers with 1x1 kernel
+
+2. __LoRA-C3Lier__ : (LoRA for __C__ olutional layers with __3__ x3 Kernel and  __Li__ n __e__ a __r__ layers)
+
+    In addition to 1., LoRA for Conv2d layers with 3x3 kernel 
+    
+LoRA-LierLa is the default LoRA type for `train_network.py` (without `conv_dim` network arg). LoRA-LierLa can be used with [our extension](https://github.com/kohya-ss/sd-webui-additional-networks) for AUTOMATIC1111's Web UI, or with the built-in LoRA feature of the Web UI.
+
+To use LoRA-C3Lier with Web UI, please use our extension.
+
+### LoRAの名称について
+
+`train_network.py` がサポートするLoRAについて、混乱を避けるため名前を付けました。ドキュメントは更新済みです。以下は当リポジトリ内の独自の名称です。
+
+1. __LoRA-LierLa__ : (LoRA for __Li__ n __e__ a __r__  __La__ yers、リエラと読みます)
+
+    Linear 層およびカーネルサイズ 1x1 の Conv2d 層に適用されるLoRA
+
+2. __LoRA-C3Lier__ : (LoRA for __C__ olutional layers with __3__ x3 Kernel and  __Li__ n __e__ a __r__ layers、セリアと読みます)
+
+    1.に加え、カーネルサイズ 3x3 の Conv2d 層に適用されるLoRA
+
+LoRA-LierLa は[Web UI向け拡張](https://github.com/kohya-ss/sd-webui-additional-networks)、またはAUTOMATIC1111氏のWeb UIのLoRA機能で使用することができます。
+
+LoRA-C3Lierを使いWeb UIで生成するには拡張を使用してください。
+
+## Sample image generation during training
   A prompt file might look like this, for example
 
 ```
@@ -501,148 +467,25 @@ masterpiece, best quality, 1boy, in business suit, standing at street, looking b
 
   The prompt weighting such as `( )` and `[ ]` are working.
 
+## サンプル画像生成
+プロンプトファイルは例えば以下のようになります。
 
-## Change History
-* 2024/02/17 (v22.6.2)
-- Fix issue with Lora Extract GUI
-  - Fix syntax issue where parameter lora_network_weights is actually called network_weights
-- Merge sd-scripts v0.8.4 code update
-  - Fixed a bug that the VRAM usage without Text Encoder training is larger than before in training scripts for LoRA etc (`train_network.py`, `sdxl_train_network.py`).
-    - Text Encoders were not moved to CPU.
-  - Fixed typos. Thanks to akx! [PR #1053](https://github.com/kohya-ss/sd-scripts/pull/1053)
-  - The log output has been improved. PR [#905](https://github.com/kohya-ss/sd-scripts/pull/905) Thanks to shirayu!
-    - The log is formatted by default. The `rich` library is required. Please see [Upgrade](#upgrade) and update the library.
-    - If `rich` is not installed, the log output will be the same as before.
-    - The following options are available in each training script:
-    - `--console_log_simple` option can be used to switch to the previous log output.
-    - `--console_log_level` option can be used to specify the log level. The default is `INFO`.
-    - `--console_log_file` option can be used to output the log to a file. The default is `None` (output to the console).
-  - The sample image generation during multi-GPU training is now done with multiple GPUs. PR [#1061](https://github.com/kohya-ss/sd-scripts/pull/1061) Thanks to DKnight54!
-  - The support for mps devices is improved. PR [#1054](https://github.com/kohya-ss/sd-scripts/pull/1054) Thanks to akx! If mps device exists instead of CUDA, the mps device is used automatically.
-  - The `--new_conv_rank` option to specify the new rank of Conv2d is added to `networks/resize_lora.py`. PR [#1102](https://github.com/kohya-ss/sd-scripts/pull/1102) Thanks to mgz-dev!
-  - An option `--highvram` to disable the optimization for environments with little VRAM is added to the training scripts. If you specify it when there is enough VRAM, the operation will be faster.
-    - Currently, only the cache part of latents is optimized.
-  - The IPEX support is improved. PR [#1086](https://github.com/kohya-ss/sd-scripts/pull/1086) Thanks to Disty0!
-  - Fixed a bug that `svd_merge_lora.py` crashes in some cases. PR [#1087](https://github.com/kohya-ss/sd-scripts/pull/1087) Thanks to mgz-dev!
-  - DyLoRA is fixed to work with SDXL. PR [#1126](https://github.com/kohya-ss/sd-scripts/pull/1126) Thanks to tamlog06!
-  - The common image generation script `gen_img.py` for SD 1/2 and SDXL is added. The basic functions are the same as the scripts for SD 1/2 and SDXL, but some new features are added.
-    - External scripts to generate prompts can be supported. It can be called with `--from_module` option. (The documentation will be added later)
-    - The normalization method after prompt weighting can be specified with `--emb_normalize_mode` option. `original` is the original method, `abs` is the normalization with the average of the absolute values, `none` is no normalization.
-  - Gradual Latent Hires fix is added to each generation script. See [here](./docs/gen_img_README-ja.md#about-gradual-latent) for details.
-  
-* 2024/02/15 (v22.6.1)
-- Add support for multi-gpu parameters in the GUI under the "Parameters > Advanced" tab.
-- Significant rewrite of how parameters are created in the code. I hope I did not break anything in the process... Will make the code easier to update.
-- Update TW locallisation
-- Update gradio module version to latest 3.x
+```
+# prompt 1
+masterpiece, best quality, (1girl), in white shirts, upper body, looking at viewer, simple background --n low quality, worst quality, bad anatomy,bad composition, poor, low effort --w 768 --h 768 --d 1 --l 7.5 --s 28
 
-* 2024/01/27 (v22.6.0)
-- Merge sd-scripts v0.8.3 code update
-  - Fixed a bug that the training crashes when `--fp8_base` is specified with `--save_state`. PR [#1079](https://github.com/kohya-ss/sd-scripts/pull/1079) Thanks to feffy380!
-    - `safetensors` is updated. Please see [Upgrade](#upgrade) and update the library.
-  - Fixed a bug that the training crashes when `network_multiplier` is specified with multi-GPU training. PR [#1084](https://github.com/kohya-ss/sd-scripts/pull/1084) Thanks to fireicewolf!
-  - Fixed a bug that the training crashes when training ControlNet-LLLite.
+# prompt 2
+masterpiece, best quality, 1boy, in business suit, standing at street, looking back --n (low quality, worst quality), bad anatomy,bad composition, poor, low effort --w 576 --h 832 --d 2 --l 5.5 --s 40
+```
 
-- Merge sd-scripts v0.8.2 code update
-  - [Experimental] The `--fp8_base` option is added to the training scripts for LoRA etc. The base model (U-Net, and Text Encoder when training modules for Text Encoder) can be trained with fp8. PR [#1057](https://github.com/kohya-ss/sd-scripts/pull/1057) Thanks to KohakuBlueleaf!
-    - Please specify `--fp8_base` in `train_network.py` or `sdxl_train_network.py`.
-    - PyTorch 2.1 or later is required.
-    - If you use xformers with PyTorch 2.1, please see [xformers repository](https://github.com/facebookresearch/xformers) and install the appropriate version according to your CUDA version.
-    - The sample image generation during training consumes a lot of memory. It is recommended to turn it off.
+  `#` で始まる行はコメントになります。`--n` のように「ハイフン二個＋英小文字」の形でオプションを指定できます。以下が使用可能できます。
 
-  - [Experimental] The network multiplier can be specified for each dataset in the training scripts for LoRA etc.
-    - This is an experimental option and may be removed or changed in the future.
-    - For example, if you train with state A as `1.0` and state B as `-1.0`, you may be able to generate by switching between state A and B depending on the LoRA application rate.
-    - Also, if you prepare five states and train them as `0.2`, `0.4`, `0.6`, `0.8`, and `1.0`, you may be able to generate by switching the states smoothly depending on the application rate.
-    - Please specify `network_multiplier` in `[[datasets]]` in `.toml` file.
+  * `--n` Negative prompt up to the next option.
+  * `--w` Specifies the width of the generated image.
+  * `--h` Specifies the height of the generated image.
+  * `--d` Specifies the seed of the generated image.
+  * `--l` Specifies the CFG scale of the generated image.
+  * `--s` Specifies the number of steps in the generation.
 
-  - Some options are added to `networks/extract_lora_from_models.py` to reduce the memory usage.
-    - `--load_precision` option can be used to specify the precision when loading the model. If the model is saved in fp16, you can reduce the memory usage by specifying `--load_precision fp16` without losing precision.
-    - `--load_original_model_to` option can be used to specify the device to load the original model. `--load_tuned_model_to` option can be used to specify the device to load the derived model. The default is `cpu` for both options, but you can specify `cuda` etc. You can reduce the memory usage by loading one of them to GPU. This option is available only for SDXL.
+  `( )` や `[ ]` などの重みづけも動作します。
 
-  - The gradient synchronization in LoRA training with multi-GPU is improved. PR [#1064](https://github.com/kohya-ss/sd-scripts/pull/1064) Thanks to KohakuBlueleaf!
-
-  - The code for Intel IPEX support is improved. PR [#1060](https://github.com/kohya-ss/sd-scripts/pull/1060) Thanks to akx!
-
-  - Fixed a bug in multi-GPU Textual Inversion training.
-
-  - `.toml` example for network multiplier
-
-    ```toml
-    [general]
-    [[datasets]]
-    resolution = 512
-    batch_size = 8
-    network_multiplier = 1.0
-
-    ... subset settings ...
-
-    [[datasets]]
-    resolution = 512
-    batch_size = 8
-    network_multiplier = -1.0
-
-    ... subset settings ...
-    ```
-
-- Merge sd-scripts v0.8.1 code update
-
-  - Fixed a bug that the VRAM usage without Text Encoder training is larger than before in training scripts for LoRA etc (`train_network.py`, `sdxl_train_network.py`).
-    - Text Encoders were not moved to CPU.
-
-  - Fixed typos. Thanks to akx! [PR #1053](https://github.com/kohya-ss/sd-scripts/pull/1053)
-
-* 2024/01/15 (v22.5.0)
-- Merged sd-scripts v0.8.0 updates
-  - Diffusers, Accelerate, Transformers and other related libraries have been updated. Please update the libraries with [Upgrade](#upgrade).
-    - Some model files (Text Encoder without position_id) based on the latest Transformers can be loaded.
-  - `torch.compile` is supported (experimental). PR [#1024](https://github.com/kohya-ss/sd-scripts/pull/1024) Thanks to p1atdev!
-    - This feature works only on Linux or WSL.
-    - Please specify `--torch_compile` option in each training script.
-    - You can select the backend with `--dynamo_backend` option. The default is `"inductor"`. `inductor` or `eager` seems to work.
-    - Please use `--spda` option instead of `--xformers` option.
-    - PyTorch 2.1 or later is recommended.
-    - Please see [PR](https://github.com/kohya-ss/sd-scripts/pull/1024) for details.
-  - The session name for wandb can be specified with `--wandb_run_name` option. PR [#1032](https://github.com/kohya-ss/sd-scripts/pull/1032) Thanks to hopl1t!
-  - IPEX library is updated. PR [#1030](https://github.com/kohya-ss/sd-scripts/pull/1030) Thanks to Disty0!
-  - Fixed a bug that Diffusers format model cannot be saved.
-- Fix LoRA config display after load that would sometime hide some of the feilds
-
-* 2024/01/02 (v22.4.1)
-- Minor bug fixed and enhancements.
-
-* 2023/12/28 (v22.4.0)
-- Fixed to work `tools/convert_diffusers20_original_sd.py`. Thanks to Disty0! PR [#1016](https://github.com/kohya-ss/sd-scripts/pull/1016)
-- The issues in multi-GPU training are fixed. Thanks to Isotr0py! PR [#989](https://github.com/kohya-ss/sd-scripts/pull/989) and [#1000](https://github.com/kohya-ss/sd-scripts/pull/1000)
-  - `--ddp_gradient_as_bucket_view` and `--ddp_bucket_view`options are added to `sdxl_train.py`. Please specify these options for multi-GPU training.
-- IPEX support is updated. Thanks to Disty0!
-- Fixed the bug that the size of the bucket becomes less than `min_bucket_reso`. Thanks to Cauldrath! PR [#1008](https://github.com/kohya-ss/sd-scripts/pull/1008)
-- `--sample_at_first` option is added to each training script. This option is useful to generate images at the first step, before training. Thanks to shirayu! PR [#907](https://github.com/kohya-ss/sd-scripts/pull/907)
-- `--ss` option is added to the sampling prompt in training. You can specify the scheduler for the sampling like `--ss euler_a`. Thanks to shirayu! PR [#906](https://github.com/kohya-ss/sd-scripts/pull/906)
-- `keep_tokens_separator` is added to the dataset config. This option is useful to keep (prevent from shuffling) the tokens in the captions. See [#975](https://github.com/kohya-ss/sd-scripts/pull/975) for details. Thanks to Linaqruf!
-  - You can specify the separator with an option like `--keep_tokens_separator "|||"` or with `keep_tokens_separator: "|||"` in `.toml`. The tokens before `|||` are not shuffled.
-- Attention processor hook is added. See [#961](https://github.com/kohya-ss/sd-scripts/pull/961) for details. Thanks to rockerBOO!
-- The optimizer `PagedAdamW` is added. Thanks to xzuyn! PR [#955](https://github.com/kohya-ss/sd-scripts/pull/955)
-- NaN replacement in SDXL VAE is sped up. Thanks to liubo0902! PR [#1009](https://github.com/kohya-ss/sd-scripts/pull/1009)
-- Fixed the path error in `finetune/make_captions.py`. Thanks to CjangCjengh! PR [#986](https://github.com/kohya-ss/sd-scripts/pull/986)
-
-* 2023/12/20 (v22.3.1)
-- Add goto button to manual caption utility
-- Add missing options for various LyCORIS training algorithms
-- Refactor how feilds are shown or hidden
-- Made max value for network and convolution rank 512 except for LyCORIS/LoKr.
-
-* 2023/12/06 (v22.3.0)
-- Merge sd-scripts updates:
-  - `finetune\tag_images_by_wd14_tagger.py` now supports the separator other than `,` with `--caption_separator` option. Thanks to KohakuBlueleaf! PR [#913](https://github.com/kohya-ss/sd-scripts/pull/913)
-  - Min SNR Gamma with V-predicition (SD 2.1) is fixed. Thanks to feffy380! PR[#934](https://github.com/kohya-ss/sd-scripts/pull/934)
-    - See [#673](https://github.com/kohya-ss/sd-scripts/issues/673) for details.
-  - `--min_diff` and `--clamp_quantile` options are added to `networks/extract_lora_from_models.py`. Thanks to wkpark! PR [#936](https://github.com/kohya-ss/sd-scripts/pull/936)
-    - The default values are same as the previous version.
-  - Deep Shrink hires fix is supported in `sdxl_gen_img.py` and `gen_img_diffusers.py`.
-    - `--ds_timesteps_1` and `--ds_timesteps_2` options denote the timesteps of the Deep Shrink for the first and second stages.
-    - `--ds_depth_1` and `--ds_depth_2` options denote the depth (block index) of the Deep Shrink for the first and second stages.
-    - `--ds_ratio` option denotes the ratio of the Deep Shrink. `0.5` means the half of the original latent size for the Deep Shrink.
-    - `--dst1`, `--dst2`, `--dsd1`, `--dsd2` and `--dsr` prompt options are also available.
-  - Add GLoRA support
--

@@ -46,4 +46,6 @@ requirements_tmp_for_setup.txt
 *.npz
 presets/*/user_presets/*
 /nppBackup
+/nppBackup
+*.log
 /library/nppBackup
