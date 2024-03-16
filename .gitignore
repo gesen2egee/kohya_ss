@@ -6,3 +6,6 @@ venv
 build
 .vscode
 wandb
+/nppBackup
+*.log
+/library/nppBackup
