@@ -398,6 +398,7 @@ class BaseSubset:
         caption_suffix: Optional[str],
         token_warmup_min: int,
         token_warmup_step: Union[float, int],
+        sample_weight: bool,
     ) -> None:
         self.image_dir = image_dir
         self.num_repeats = num_repeats
@@ -419,7 +420,7 @@ class BaseSubset:
 
         self.token_warmup_min = token_warmup_min  # step=0におけるタグの数
         self.token_warmup_step = token_warmup_step  # N（N<1ならN*max_train_steps）ステップ目でタグの数が最大になる
-
+        self.sample_weight = sample_weight
         self.img_count = 0
 
 
@@ -448,6 +449,7 @@ class DreamBoothSubset(BaseSubset):
         caption_suffix,
         token_warmup_min,
         token_warmup_step,
+        sample_weight,
     ) -> None:
         assert image_dir is not None, "image_dir must be specified / image_dirは指定が必須です"
 
@@ -471,6 +473,7 @@ class DreamBoothSubset(BaseSubset):
             caption_suffix,
             token_warmup_min,
             token_warmup_step,
+            sample_weight,
         )
 
         self.is_reg = is_reg
@@ -508,6 +511,7 @@ class FineTuningSubset(BaseSubset):
         caption_suffix,
         token_warmup_min,
         token_warmup_step,
+        sample_weight,
     ) -> None:
         assert metadata_file is not None, "metadata_file must be specified / metadata_fileは指定が必須です"
 
@@ -531,6 +535,7 @@ class FineTuningSubset(BaseSubset):
             caption_suffix,
             token_warmup_min,
             token_warmup_step,
+            sample_weight,
         )
 
         self.metadata_file = metadata_file
@@ -565,6 +570,7 @@ class ControlNetSubset(BaseSubset):
         caption_suffix,
         token_warmup_min,
         token_warmup_step,
+        sample_weight,
     ) -> None:
         assert image_dir is not None, "image_dir must be specified / image_dirは指定が必須です"
 
@@ -588,6 +594,7 @@ class ControlNetSubset(BaseSubset):
             caption_suffix,
             token_warmup_min,
             token_warmup_step,
+            sample_weight,
         )
 
         self.conditioning_data_dir = conditioning_data_dir
@@ -1193,6 +1200,13 @@ class BaseDataset(torch.utils.data.Dataset):
             image_info = self.image_data[image_key]
             subset = self.image_to_subset[image_key]
             sample_weight = 1.0
+            if self.sample_weight is not None:
+                sample_weight_path = os.path.splitext(info.absolute_path)[0] + ".weight"
+                try:
+                    with open(sample_weight_path, 'r', encoding='utf-8') as file:
+                        sample_weight = float(file.readline().strip())
+                except (OSError, ValueError):
+                    pass
             loss_weights.append(sample_weight * (self.prior_loss_weight if image_info.is_reg else 1.0))  # in case of fine tuning, is_reg is always False
 
             flipped = subset.flip_aug and random.random() < 0.5  # not flipped or flipped with 50% chance
@@ -1875,6 +1889,7 @@ class ControlNetDataset(BaseDataset):
                 subset.caption_suffix,
                 subset.token_warmup_min,
                 subset.token_warmup_step,
+                subset.sample_weight,
             )
             db_subsets.append(db_subset)
 
