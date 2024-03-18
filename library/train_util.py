@@ -3622,6 +3622,7 @@ def add_dataset_arguments(
         "--enable_wildcard",
         action="store_true",
         help="enable wildcard for caption (e.g. '{image|picture|rendition}') / captionのワイルドカードを有効にする（例：'{image|picture|rendition}'）",
+    )
     parser.add_argument(
         "--use_object_template",
         action="store_true",
