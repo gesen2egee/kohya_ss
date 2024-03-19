@@ -1983,6 +1983,7 @@ class ControlNetDataset(BaseDataset):
             validation_split,
             validation_seed,
             debug_dataset,
+            sample_weight,
         )
 
         # config_util等から参照される値をいれておく（若干微妙なのでなんとかしたい）
