@@ -695,7 +695,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.width, self.height = (None, None) if resolution is None else resolution
         self.network_multiplier = network_multiplier
         self.debug_dataset = debug_dataset
-
+        self.sample_weight = sample_weight
         self.subsets: List[Union[DreamBoothSubset, FineTuningSubset]] = []
 
         self.token_padding_disabled = False
@@ -1271,7 +1271,7 @@ class BaseDataset(torch.utils.data.Dataset):
             image_info = self.image_data[image_key]
             subset = self.image_to_subset[image_key]
             sample_weight = 1.0
-            if self.sample_weight is not None:
+            if subset.sample_weight is not None:
                 sample_weight_path = os.path.splitext(info.absolute_path)[0] + ".weight"
                 try:
                     with open(sample_weight_path, 'r', encoding='utf-8') as file:
@@ -1545,8 +1545,8 @@ class DreamBoothDataset(BaseDataset):
         self.batch_size = batch_size
         self.size = min(self.width, self.height)  # 短いほう
         self.prior_loss_weight = prior_loss_weight
-        self.latents_cache = None
         self.sample_weight = sample_weight
+        self.latents_cache = None
         self.enable_bucket = enable_bucket
         if self.enable_bucket:
             assert (
