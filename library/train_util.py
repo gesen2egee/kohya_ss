@@ -1262,7 +1262,7 @@ class BaseDataset(torch.utils.data.Dataset):
             image_info = self.image_data[image_key]
             subset = self.image_to_subset[image_key]
             sample_weight = 1.0
-            sample_weight_path = os.path.splitext(info.absolute_path)[0] + ".weight"
+            sample_weight_path = os.path.splitext(image_info.absolute_path)[0] + ".weight"
             try:
                 with open(sample_weight_path, 'r', encoding='utf-8') as file:
                     sample_weight = float(file.readline().strip())
