@@ -1533,6 +1533,7 @@ class DreamBoothDataset(BaseDataset):
         validation_split: float,
         validation_seed: Optional[int],        
         debug_dataset: bool,
+        sample_weight: bool,
     ) -> None:
         super().__init__(tokenizer, max_token_length, resolution, network_multiplier, debug_dataset)
 
@@ -1545,7 +1546,7 @@ class DreamBoothDataset(BaseDataset):
         self.size = min(self.width, self.height)  # 短いほう
         self.prior_loss_weight = prior_loss_weight
         self.latents_cache = None
-
+        self.sample_weight = sample_weight
         self.enable_bucket = enable_bucket
         if self.enable_bucket:
             assert (
