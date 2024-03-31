@@ -12,11 +12,12 @@ from tqdm import tqdm
 import torch
 from library.device_utils import init_ipex, clean_memory_on_device
 
+
 init_ipex()
 
 from accelerate.utils import set_seed
 from diffusers import DDPMScheduler
-from library import sdxl_model_util
+from library import deepspeed_utils, sdxl_model_util
 
 import library.train_util as train_util
 
@@ -40,6 +41,7 @@ from library.custom_train_functions import (
     scale_v_prediction_loss_like_noise_prediction,
     add_v_prediction_like_loss,
     apply_debiased_estimation,
+    apply_masked_loss,
 )
 from library.sdxl_original_unet import SdxlUNet2DConditionModel
 from library.train_util import (
@@ -101,6 +103,7 @@ def train(args):
     train_util.verify_training_args(args)
     train_util.prepare_dataset_args(args, True)
     sdxl_train_util.verify_sdxl_training_args(args)
+    deepspeed_utils.prepare_deepspeed_args(args)
     setup_logging(args, reset=True)
 
     assert (
@@ -410,15 +413,34 @@ def train(args):
     # acceleratorがなんかよろしくやってくれるらしい
     if train_unet:
         unet = accelerator.prepare(unet)
+    # freeze last layer and final_layer_norm in te1 since we use the output of the penultimate layer
+
     if train_text_encoder1:
-        # freeze last layer and final_layer_norm in te1 since we use the output of the penultimate layer
         text_encoder1.text_model.encoder.layers[-1].requires_grad_(False)
         text_encoder1.text_model.final_layer_norm.requires_grad_(False)
-        text_encoder1 = accelerator.prepare(text_encoder1)
-    if train_text_encoder2:
-        text_encoder2 = accelerator.prepare(text_encoder2)
 
-    optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
+    if args.deepspeed:
+        ds_model = deepspeed_utils.prepare_deepspeed_model(
+            args,
+            unet=unet if train_unet else None,
+            text_encoder1=text_encoder1 if train_text_encoder1 else None,
+            text_encoder2=text_encoder2 if train_text_encoder2 else None,
+        )
+        # most of ZeRO stage uses optimizer partitioning, so we have to prepare optimizer and ds_model at the same time. # pull/1139#issuecomment-1986790007
+        ds_model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            ds_model, optimizer, train_dataloader, lr_scheduler
+        )
+        training_models = [ds_model]
+
+    else:
+        # acceleratorがなんかよろしくやってくれるらしい
+        if train_unet:
+            unet = accelerator.prepare(unet)
+        if train_text_encoder1:
+            text_encoder1 = accelerator.prepare(text_encoder1)
+        if train_text_encoder2:
+            text_encoder2 = accelerator.prepare(text_encoder2)
+        optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
 
     # TextEncoderの出力をキャッシュするときにはCPUへ移動する
     if args.cache_text_encoder_outputs:
@@ -433,6 +455,8 @@ def train(args):
 
     # 実験的機能：勾配も含めたfp16学習を行う　PyTorchにパッチを当ててfp16でのgrad scaleを有効にする
     if args.full_fp16:
+        # During deepseed training, accelerate not handles fp16/bf16|mixed precision directly via scaler. Let deepspeed engine do.
+        # -> But we think it's ok to patch accelerator even if deepspeed is enabled.
         train_util.patch_accelerator_for_fp16_training(accelerator)
 
     # resumeする
@@ -585,19 +609,13 @@ def train(args):
                     or args.scale_v_pred_loss_like_noise_pred
                     or args.v_pred_like_loss
                     or args.debiased_estimation_loss
+                    or args.masked_loss
                 ):
                     # do not mean over batch dimension for snr weight or scale v-pred loss
                     loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
 
                     if args.masked_loss:
-                        # mask image is -1 to 1. we need to convert it to 0 to 1
-                        mask_image = batch["conditioning_images"].to(dtype=weight_dtype)[:, 0].unsqueeze(1)  # use R channel
-
-                        # resize to the same size as the loss
-                        mask_image = torch.nn.functional.interpolate(mask_image, size=loss.shape[2:], mode="area")
-                        mask_image = mask_image / 2 + 0.5
-                        loss = loss * mask_image
-
+                        loss = apply_masked_loss(loss, batch)
                     loss = loss.mean([1, 2, 3])
 
                     if args.min_snr_gamma:
@@ -766,6 +784,8 @@ def setup_parser() -> argparse.ArgumentParser:
     train_util.add_sd_models_arguments(parser)
     train_util.add_dataset_arguments(parser, True, True, True)
     train_util.add_training_arguments(parser, False)
+    train_util.add_masked_loss_arguments(parser)
+    deepspeed_utils.add_deepspeed_arguments(parser)
     train_util.add_sd_saving_arguments(parser)
     train_util.add_optimizer_arguments(parser)
     config_util.add_config_arguments(parser)
@@ -801,14 +821,6 @@ def setup_parser() -> argparse.ArgumentParser:
         help=f"learning rates for each block of U-Net, comma-separated, {UNET_NUM_BLOCKS_FOR_BLOCK_LR} values / "
         + f"U-Netの各ブロックの学習率、カンマ区切り、{UNET_NUM_BLOCKS_FOR_BLOCK_LR}個の値",
     )
-
-    # TODO common masked_loss argument
-    parser.add_argument(
-        "--masked_loss",
-        action="store_true",
-        help="apply mask for calculating loss. conditioning_data_dir is required for dataset. / 損失計算時にマスクを適用する。datasetにはconditioning_data_dirが必要",
-    )
-
     return parser
 
 

@@ -16,11 +16,9 @@ from library.device_utils import init_ipex, clean_memory_on_device
 
 init_ipex()
 
-from torch.nn.parallel import DistributedDataParallel as DDP
-
 from accelerate.utils import set_seed
 from diffusers import DDPMScheduler
-from library import model_util
+from library import deepspeed_utils, model_util
 
 import library.train_util as train_util
 from library.train_util import (
@@ -28,6 +26,7 @@ from library.train_util import (
     EMA,
     check_and_update_ema,
 )
+from library.train_util import DreamBoothDataset
 import library.config_util as config_util
 from library.config_util import (
     ConfigSanitizer,
@@ -43,6 +42,7 @@ from library.custom_train_functions import (
     scale_v_prediction_loss_like_noise_prediction,
     add_v_prediction_like_loss,
     apply_debiased_estimation,
+    apply_masked_loss,
 )
 from library.utils import setup_logging, add_logging_arguments
 
@@ -205,6 +205,7 @@ class NetworkTrainer:
         training_started_at = time.time()
         train_util.verify_training_args(args)
         train_util.prepare_dataset_args(args, True)
+        deepspeed_utils.prepare_deepspeed_args(args)
         setup_logging(args, reset=True)
 
         cache_latents = args.cache_latents
@@ -495,33 +496,49 @@ class NetworkTrainer:
                 t_enc.text_model.embeddings.to(dtype=(weight_dtype if te_weight_dtype != weight_dtype else te_weight_dtype))
 
         # acceleratorがなんかよろしくやってくれるらしい / accelerator will do something good
-        if train_unet:
-            unet = accelerator.prepare(unet)
+        if args.deepspeed:
+            ds_model = deepspeed_utils.prepare_deepspeed_model(
+                args,
+                unet=unet if train_unet else None,
+                text_encoder1=text_encoders[0] if train_text_encoder else None,
+                text_encoder2=text_encoders[1] if train_text_encoder and len(text_encoders) > 1 else None,
+                network=network,
+            )
+            ds_model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                ds_model, optimizer, train_dataloader, lr_scheduler
+            )
+            training_model = ds_model
         else:
-            unet.to(accelerator.device, dtype=unet_weight_dtype)  # move to device because unet is not prepared by accelerator
-        if train_text_encoder:
-            if len(text_encoders) > 1:
-                text_encoder = text_encoders = [accelerator.prepare(t_enc) for t_enc in text_encoders]
+            if train_unet:
+                unet = accelerator.prepare(unet)
             else:
-                text_encoder = accelerator.prepare(text_encoder)
-                text_encoders = [text_encoder]
-        else:
-            pass  # if text_encoder is not trained, no need to prepare. and device and dtype are already set
+                unet.to(accelerator.device, dtype=unet_weight_dtype)  # move to device because unet is not prepared by accelerator
+            if train_text_encoder:
+                if len(text_encoders) > 1:
+                    text_encoder = text_encoders = [accelerator.prepare(t_enc) for t_enc in text_encoders]
+                else:
+                    text_encoder = accelerator.prepare(text_encoder)
+                    text_encoders = [text_encoder]
+            else:
+                pass  # if text_encoder is not trained, no need to prepare. and device and dtype are already set
 
-        if args.enable_ema: 
-            if args.ema_type == 'traditional':
-                ema = EMA(network, beta = args.ema_beta, karras_beta = args.ema_karras_beta, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, power = args.ema_warmup_power, include_online_model = False, allow_different_devices = True)
-                emas = [ema]
-            elif args.ema_type == 'post-hoc':
-                snapshot_every = math.floor(args.max_train_steps / args.ema_k_num_snapshots)
-                ema1 = EMA(network, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 16.97, post_hoc_snapshot_every = snapshot_every)
-                ema2 = EMA(network, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 6.94, post_hoc_snapshot_every = snapshot_every)
-                emas = [ema1, ema2]
-            if args.ema_on_gpu:
-                for e in emas:
-                    e.to(device=accelerator.device)
+            if args.enable_ema: 
+                if args.ema_type == 'traditional':
+                    ema = EMA(network, beta = args.ema_beta, karras_beta = args.ema_karras_beta, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, power = args.ema_warmup_power, include_online_model = False, allow_different_devices = True)
+                    emas = [ema]
+                elif args.ema_type == 'post-hoc':
+                    snapshot_every = math.floor(args.max_train_steps / args.ema_k_num_snapshots)
+                    ema1 = EMA(network, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 16.97, post_hoc_snapshot_every = snapshot_every)
+                    ema2 = EMA(network, update_after_step = args.ema_update_after_step, update_every = args.ema_update_every, include_online_model = False, allow_different_devices = True, post_hoc = True, post_hoc_gamma = 6.94, post_hoc_snapshot_every = snapshot_every)
+                    emas = [ema1, ema2]
+                if args.ema_on_gpu:
+                    for e in emas:
+                        e.to(device=accelerator.device)
 
-        network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
+            network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                network, optimizer, train_dataloader, lr_scheduler
+            )
+            training_model = network
 
         if args.gradient_checkpointing:
             # according to TI example in Diffusers, train is required
@@ -550,6 +567,31 @@ class NetworkTrainer:
         # 実験的機能：勾配も含めたfp16学習を行う　PyTorchにパッチを当ててfp16でのgrad scaleを有効にする
         if args.full_fp16:
             train_util.patch_accelerator_for_fp16_training(accelerator)
+
+        # before resuming make hook for saving/loading to save/load the network weights only
+        def save_model_hook(models, weights, output_dir):
+            # pop weights of other models than network to save only network weights
+            if accelerator.is_main_process:
+                remove_indices = []
+                for i,model in enumerate(models):
+                    if not isinstance(model, type(accelerator.unwrap_model(network))):
+                        remove_indices.append(i)
+                for i in reversed(remove_indices):
+                    weights.pop(i)
+                # print(f"save model hook: {len(weights)} weights will be saved")
+
+        def load_model_hook(models, input_dir):
+            # remove models except network
+            remove_indices = []
+            for i, model in enumerate(models):
+                if not isinstance(model, type(accelerator.unwrap_model(network))):
+                    remove_indices.append(i)
+            for i in reversed(remove_indices):
+                models.pop(i)
+            # print(f"load model hook: {len(models)} models will be loaded")
+
+        accelerator.register_save_state_pre_hook(save_model_hook)
+        accelerator.register_load_state_pre_hook(load_model_hook)
 
         # resumeする
         train_util.resume_from_local_or_hf_if_specified(accelerator, args)
@@ -861,22 +903,21 @@ class NetworkTrainer:
 
             for step, batch in enumerate(train_dataloader):
                 current_step.value = global_step
-                with accelerator.accumulate(network):
-                    on_step_start(text_encoder, unet)
-                    
+                with accelerator.accumulate(training_model):
+                    on_step_start(text_encoder, unet)                    
                     is_train = True
-                    with torch.no_grad():
-                        if "latents" in batch and batch["latents"] is not None:
-                            latents = batch["latents"].to(accelerator.device)
-                        else:
+                    if "latents" in batch and batch["latents"] is not None:
+                        latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                    else:
+                        with torch.no_grad():
                             # latentに変換
-                            latents = vae.encode(batch["images"].to(dtype=vae_dtype)).latent_dist.sample()
+                            latents = vae.encode(batch["images"].to(dtype=vae_dtype)).latent_dist.sample().to(dtype=weight_dtype)
 
                             # NaNが含まれていれば警告を表示し0に置き換える
                             if torch.any(torch.isnan(latents)):
                                 accelerator.print("NaN found in latents, replacing with zeros")
                                 latents = torch.nan_to_num(latents, 0, out=latents)
-                        latents = latents * self.vae_scale_factor
+                    latents = latents * self.vae_scale_factor
 
                     # get multiplier for each sample
                     if network_has_multiplier:
@@ -940,14 +981,7 @@ class NetworkTrainer:
                     loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
 
                     if args.masked_loss:
-                        # mask image is -1 to 1. we need to convert it to 0 to 1
-                        mask_image = batch["conditioning_images"].to(dtype=weight_dtype)[:, 0].unsqueeze(1)  # use R channel
-
-                        # resize to the same size as the loss
-                        mask_image = torch.nn.functional.interpolate(mask_image, size=loss.shape[2:], mode="area")
-                        mask_image = mask_image / 2 + 0.5
-                        loss = loss * mask_image
-
+                        loss = apply_masked_loss(loss, batch)
                     loss = loss.mean([1, 2, 3])
 
                     loss_weights = batch["loss_weights"]  # 各sampleごとのweight
@@ -1114,6 +1148,8 @@ def setup_parser() -> argparse.ArgumentParser:
     train_util.add_sd_models_arguments(parser)
     train_util.add_dataset_arguments(parser, True, True, True)
     train_util.add_training_arguments(parser, True)
+    train_util.add_masked_loss_arguments(parser)
+    deepspeed_utils.add_deepspeed_arguments(parser)
     train_util.add_optimizer_arguments(parser)
     config_util.add_config_arguments(parser)
     custom_train_functions.add_custom_train_arguments(parser)
