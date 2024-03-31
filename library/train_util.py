@@ -3398,6 +3398,7 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help=(
             "apply ToDo to deeper layers (lower quality for slight speed increase). SDXL only accepts 2 and 3. Recommend 1 or 2. Default 1 (or 2 for SDXL)"
         ),
+    )
     parser.add_argument(
         "--loss_type",
         type=str,
