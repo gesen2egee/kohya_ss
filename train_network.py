@@ -1244,11 +1244,6 @@ def setup_parser() -> argparse.ArgumentParser:
         help="do not use fp16/bf16 VAE in mixed precision (use float VAE) / mixed precisionでも fp16/bf16 VAEを使わずfloat VAEを使う",
     )
     parser.add_argument(
-        "--masked_loss",
-        action="store_true",
-        help="apply mask for calculating loss. conditioning_data_dir is required for dataset. / 損失計算時にマスクを適用する。datasetにはconditioning_data_dirが必要",
-    )
-    parser.add_argument(
         "--validation_seed",
         type=int,
         default=None,
