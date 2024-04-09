@@ -254,15 +254,24 @@ def train(args):
         network.to(weight_dtype)
 
     # acceleratorがなんかよろしくやってくれるらしい
-    unet, network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, network, optimizer, train_dataloader, lr_scheduler
-    )
+    if args.optimizer_type.lower().endswith("scheduleFree"):
+        unet, network, optimizer, train_dataloader = accelerator.prepare(
+            unet, network, optimizer, train_dataloader
+        )
+    else:
+        unet, network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            unet, network, optimizer, train_dataloader, lr_scheduler
+        )
     network: control_net_lllite.ControlNetLLLite
 
     if args.gradient_checkpointing:
         unet.train()  # according to TI example in Diffusers, train is required -> これオリジナルのU-Netしたので本当は外せる
+        if (args.optimizer_type.lower().endswith("schedulefree")):
+            optimizer.train()
     else:
         unet.eval()
+        if (args.optimizer_type.lower().endswith("schedulefree")):
+            optimizer.eval()
 
     network.prepare_grad_etc()
 
@@ -449,7 +458,8 @@ def train(args):
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                 optimizer.step()
-                lr_scheduler.step()
+                if not args.optimizer_type.lower().endswith("scheduleFree"):
+                    lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
             # Checks if the accelerator has performed an optimization step behind the scenes
@@ -580,6 +590,7 @@ if __name__ == "__main__":
     parser = setup_parser()
 
     args = parser.parse_args()
+    train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
 
     train(args)

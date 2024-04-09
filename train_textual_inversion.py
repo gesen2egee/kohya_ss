@@ -417,14 +417,24 @@ class TextualInversionTrainer:
 
         # acceleratorがなんかよろしくやってくれるらしい
         if len(text_encoders) == 1:
-            text_encoder_or_list, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-                text_encoder_or_list, optimizer, train_dataloader, lr_scheduler
-            )
+            if args.optimizer_type.lower().endswith("scheduleFree"):
+                text_encoder_or_list, optimizer, train_dataloader = accelerator.preparet(
+                    text_encoder_or_list, optimizer, train_dataloader
+                )   
+            else:
+                text_encoder_or_list, optimizer, train_dataloader, lr_scheduler = accelerator.preparet(
+                    text_encoder_or_list, optimizer, train_dataloader, lr_scheduler
+                )
 
         elif len(text_encoders) == 2:
-            text_encoder1, text_encoder2, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-                text_encoders[0], text_encoders[1], optimizer, train_dataloader, lr_scheduler
-            )
+            if args.optimizer_type.lower().endswith("scheduleFree"):
+                text_encoder1, text_encoder2, optimizer, train_dataloader = accelerator.prepare(
+                    text_encoders[0], text_encoders[1], optimizer, train_dataloader
+                )  
+            else:
+                text_encoder1, text_encoder2, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                    text_encoders[0], text_encoders[1], optimizer, train_dataloader, lr_scheduler
+                )
 
             text_encoder_or_list = text_encoders = [text_encoder1, text_encoder2]
 
@@ -588,9 +598,9 @@ class TextualInversionTrainer:
                         target = noise_scheduler.get_velocity(latents, noise, timesteps)
                     else:
                         target = noise
-                        
+
                     loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
-                    
+
                     if args.masked_loss:
                         loss = apply_masked_loss(loss, batch)
                         
@@ -811,6 +821,7 @@ if __name__ == "__main__":
     parser = setup_parser()
 
     args = parser.parse_args()
+    train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
 
     trainer = TextualInversionTrainer()

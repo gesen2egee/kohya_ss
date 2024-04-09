@@ -277,9 +277,14 @@ def train(args):
         controlnet.to(weight_dtype)
 
     # acceleratorがなんかよろしくやってくれるらしい
-    controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        controlnet, optimizer, train_dataloader, lr_scheduler
-    )
+    if args.optimizer_type.lower().endswith("scheduleFree"):
+        controlnet, optimizer, train_dataloader = accelerator.prepare(
+            controlnet, optimizer, train_dataloader
+        )
+    else:
+        controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            controlnet, optimizer, train_dataloader, lr_scheduler
+        )
 
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
@@ -615,6 +620,7 @@ if __name__ == "__main__":
     parser = setup_parser()
 
     args = parser.parse_args()
+    train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
 
     train(args)

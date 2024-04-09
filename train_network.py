@@ -504,9 +504,14 @@ class NetworkTrainer:
                 text_encoder2=text_encoders[1] if train_text_encoder and len(text_encoders) > 1 else None,
                 network=network,
             )
-            ds_model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-                ds_model, optimizer, train_dataloader, lr_scheduler
-            )
+            if args.optimizer_type.lower().endswith("scheduleFree"):
+                ds_model, optimizer, train_dataloader = accelerator.prepare(
+                    ds_model, optimizer, train_dataloader
+                )    
+            else:
+                ds_model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                    ds_model, optimizer, train_dataloader, lr_scheduler
+                )
             training_model = ds_model
         else:
             if train_unet:
@@ -534,15 +539,23 @@ class NetworkTrainer:
                 if args.ema_on_gpu:
                     for e in emas:
                         e.to(device=accelerator.device)
+            
+            if args.optimizer_type.lower().endswith("scheduleFree"):
+                network, optimizer, train_dataloader = accelerator.prepare(
+                    network, optimizer, train_dataloader
+                )  
+            else:
+                network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                    network, optimizer, train_dataloader, lr_scheduler
+                )
 
-            network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-                network, optimizer, train_dataloader, lr_scheduler
-            )
             training_model = network
 
         if args.gradient_checkpointing:
             # according to TI example in Diffusers, train is required
             unet.train()
+            if (args.optimizer_type.lower().endswith("schedulefree")):
+                optimizer.train()
             for t_enc in text_encoders:
                 t_enc.train()
 
@@ -573,7 +586,7 @@ class NetworkTrainer:
             # pop weights of other models than network to save only network weights
             if accelerator.is_main_process:
                 remove_indices = []
-                for i,model in enumerate(models):
+                for i, model in enumerate(models):
                     if not isinstance(model, type(accelerator.unwrap_model(network))):
                         remove_indices.append(i)
                 for i in reversed(remove_indices):
@@ -668,6 +681,11 @@ class NetworkTrainer:
             "ss_ip_noise_gamma": args.ip_noise_gamma,
             "ss_debiased_estimation": bool(args.debiased_estimation_loss),
             "ss_enable_ema": bool(args.enable_ema),
+            "ss_noise_offset_random_strength": args.noise_offset_random_strength,
+            "ss_ip_noise_gamma_random_strength": args.ip_noise_gamma_random_strength,
+            "ss_loss_type": args.loss_type,
+            "ss_huber_schedule": args.huber_schedule,
+            "ss_huber_c": args.huber_c,
         }
 
         if use_user_config:
@@ -978,7 +996,9 @@ class NetworkTrainer:
                     else:
                         target = noise
 
-                    loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
+                    loss = train_util.conditional_loss(
+                        noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                    )
 
                     if args.masked_loss:
                         loss = apply_masked_loss(loss, batch)
@@ -1006,7 +1026,8 @@ class NetworkTrainer:
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                     optimizer.step()
-                    lr_scheduler.step()
+                    if not args.optimizer_type.lower().endswith("scheduleFree"):
+                        lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
                     if args.enable_ema:
@@ -1274,6 +1295,7 @@ if __name__ == "__main__":
     parser = setup_parser()
 
     args = parser.parse_args()
+    train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
 
     trainer = NetworkTrainer()

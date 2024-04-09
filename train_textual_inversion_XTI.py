@@ -335,9 +335,14 @@ def train(args):
     lr_scheduler = train_util.get_scheduler_fix(args, optimizer, accelerator.num_processes)
 
     # acceleratorがなんかよろしくやってくれるらしい
-    text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        text_encoder, optimizer, train_dataloader, lr_scheduler
-    )
+    if args.optimizer_type.lower().endswith("scheduleFree"):
+        text_encoder, optimizer, train_dataloader = accelerator.prepare(
+            text_encoder, optimizer, train_dataloader
+        )   
+    else:
+        text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            text_encoder, optimizer, train_dataloader, lr_scheduler
+        )
 
     index_no_updates = torch.arange(len(tokenizer)) < token_ids_XTI[0]
     # logger.info(len(index_no_updates), torch.sum(index_no_updates))
@@ -354,8 +359,12 @@ def train(args):
     unet.to(accelerator.device, dtype=weight_dtype)
     if args.gradient_checkpointing:  # according to TI example in Diffusers, train is required
         unet.train()
+        if (args.optimizer_type.lower().endswith("schedulefree")):
+            optimizer.train()
     else:
         unet.eval()
+        if (args.optimizer_type.lower().endswith("schedulefree")):
+            optimizer.eval()
 
     if not cache_latents:
         vae.requires_grad_(False)
@@ -474,7 +483,7 @@ def train(args):
                     target = noise
 
                 loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
-                
+
                 if args.masked_loss:
                     loss = apply_masked_loss(loss, batch)
                 loss = loss.mean([1, 2, 3])
@@ -497,7 +506,8 @@ def train(args):
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                 optimizer.step()
-                lr_scheduler.step()
+                if not args.optimizer_type.lower().endswith("scheduleFree"):
+                    lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
                 # Let's make sure we don't update any embedding weights besides the newly added token
@@ -715,6 +725,7 @@ if __name__ == "__main__":
     parser = setup_parser()
 
     args = parser.parse_args()
+    train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
 
     train(args)
