@@ -25,11 +25,9 @@
 # this is for onnx:
 # this is for onnx: 
 # timm==0.6.12ge
-accelerate==0.25.0
 aiofiles==23.2.1
 altair==4.2.2
 beartype
-bitsandbytes==0.43.0
 dadaptation==3.1
 diffusers[torch]==0.25.0
 easygui==0.98.3
@@ -41,7 +39,7 @@ huggingface-hub==0.20.1
 imagesize==1.4.1
 invisible-watermark==0.2.0
 lion-pytorch==0.0.6
-lycoris_lora==2.3.0.dev5
+lycoris_lora==2.3.0.dev4
 omegaconf==2.3.0
 onnx==1.14.1
 onnxruntime-gpu==1.16.0
