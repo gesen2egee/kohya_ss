@@ -41,7 +41,7 @@ huggingface-hub==0.20.1
 imagesize==1.4.1
 invisible-watermark==0.2.0
 lion-pytorch==0.0.6
-lycoris_lora==2.3.0.dev4
+lycoris_lora==2.3.0.dev5
 omegaconf==2.3.0
 onnx==1.14.1
 onnxruntime-gpu==1.16.0
@@ -60,4 +60,6 @@ toml==0.10.2
 transformers==4.36.2
 voluptuous==0.13.1
 wandb==0.15.11
+schedulefree
+git+https://github.com/huggingface/accelerate.git@main#egg=accelerate
 -e . # no_verify leave this to specify not checking this a verification sta
