@@ -1617,6 +1617,8 @@ class DreamBoothDataset(BaseDataset):
                 # we may need to check image size and existence of image files, but it takes time, so user should check it before training
             else:
                 img_paths = glob_images(subset.image_dir, "*")
+                if self.validation_split > 0.0:
+                    img_paths = split_train_val(img_paths, self.is_train, self.validation_split, self.validation_seed)
                 sizes = [None] * len(img_paths)
 
             logger.info(f"found directory {subset.image_dir} contains {len(img_paths)} image files")
