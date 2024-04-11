@@ -521,10 +521,10 @@ def train(args):
 
         for m in training_models:
             m.train()
-            if (args.optimizer_type.lower().endswith("schedulefree")):
-                optimizer.train()
 
         for step, batch in enumerate(train_dataloader):
+            if (args.optimizer_type.lower().endswith("schedulefree")):
+                optimizer.train()
             current_step.value = global_step
             with accelerator.accumulate(*training_models):
                 if "latents" in batch and batch["latents"] is not None:
@@ -655,6 +655,9 @@ def train(args):
 
                 if args.enable_ema:
                     raise NotImplementedError
+
+            if (args.optimizer_type.lower().endswith("schedulefree")):
+                optimizer.eval()
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
