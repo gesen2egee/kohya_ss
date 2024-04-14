@@ -323,6 +323,7 @@ class TextualInversionTrainer:
         collator = train_util.collator_class(current_epoch, current_step, ds_for_collator)
 
         # make captions: tokenstring tokenstring1 tokenstring2 ...tokenstringn という文字列に書き換える超乱暴な実装
+        prompt_replacements = []
         if use_template:
             accelerator.print(f"use template for training captions. is object: {args.use_object_template}")
             templates = imagenet_templates_small if args.use_object_template else imagenet_style_templates_small
@@ -335,16 +336,15 @@ class TextualInversionTrainer:
             # サンプル生成用
             if args.num_vectors_per_token > 1:
                 prompt_replacement = (args.token_string, replace_to)
-            else:
-                prompt_replacement = None
+                prompt_replacements.append(prompt_replacement)
+            
         else:
             # サンプル生成用
             if args.num_vectors_per_token > 1:
                 replace_to = " ".join(token_strings)
                 train_dataset_group.add_replacement(args.token_string, replace_to)
                 prompt_replacement = (args.token_string, replace_to)
-            else:
-                prompt_replacement = None
+                prompt_replacements.append(prompt_replacement)
 
         if args.debug_dataset:
             train_util.debug_dataset(train_dataset_group, show_input_ids=True)
@@ -543,7 +543,7 @@ class TextualInversionTrainer:
             tokenizer_or_list,
             text_encoder_or_list,
             unet,
-            prompt_replacement,
+            prompt_replacement=prompt_replacements,
         )
 
         # training loop
@@ -642,7 +642,7 @@ class TextualInversionTrainer:
                         tokenizer_or_list,
                         text_encoder_or_list,
                         unet,
-                        prompt_replacement,
+                        prompt_replacement=prompt_replacements,
                     )
 
                     # 指定ステップごとにモデルを保存
@@ -725,7 +725,7 @@ class TextualInversionTrainer:
                 tokenizer_or_list,
                 text_encoder_or_list,
                 unet,
-                prompt_replacement,
+                prompt_replacement=prompt_replacements,
             )
 
             # end of epoch
