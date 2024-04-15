@@ -92,7 +92,6 @@ imagenet_style_templates_small = [
     "a large painting in the style of {}",
 ]
 
-
 class TextualInversionTrainer:
     def __init__(self):
         self.vae_scale_factor = 0.18215

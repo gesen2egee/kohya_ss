@@ -131,8 +131,8 @@ class NetworkTrainer:
             if param.grad is not None:
                 param.grad = accelerator.reduce(param.grad, reduction="mean")
 
-    def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, prompt_replacement=prompt_replacements):
-        train_util.sample_images(accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, prompt_replacement=prompt_replacements)
+    def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, prompt_replacement):
+        train_util.sample_images(accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, prompt_replacement)
 
     def create_embedding_from_data(self, data, name='unknown'):
         if 'string_to_param' in data:  # textual inversion embeddings
@@ -540,18 +540,16 @@ class NetworkTrainer:
         if args.continue_inversion:
             token_ids_list = []
             for emb_name in embeddings_map.keys():
-                for i, sublist in enumerate(embedding_to_token_ids[emb_name]):
-                    if i >= len(token_ids_list):
-                        token_ids_list.append(sublist)
-                    else:
-                        token_ids_list[i].extend(sublist)
-
+                token_ids_group = []
+                for sublist in embedding_to_token_ids[emb_name]:
+                    token_ids_group.extend(sublist)
+                token_ids_list.append(token_ids_group)
             index_no_updates_list = []
             orig_embeds_params_list = []
             for tokenizer, token_ids, t_enc in zip(tokenizers, token_ids_list, text_encoders):
                 index_no_updates = torch.arange(len(tokenizer)) < token_ids[0]
                 index_no_updates_list.append(index_no_updates)
-                orig_embeds_params = accelerator.unwrap_model(t_enc).get_input_embeddings().weight.data.detach().clone()
+                orig_embeds_params = accelerator.unwrap_model(t_enc).get_input_embeddings().weight.detach().clone()
                 orig_embeds_params_list.append(orig_embeds_params)
 
                 # Freeze all parameters except for the token embeddings in text encoder
@@ -894,7 +892,7 @@ class NetworkTrainer:
                 # Bundle embeddings in LoRA state dict
                 state_dict = unwrapped_nw.state_dict()
                 for emb_name in embeddings_map.keys():
-                    accelerator.print(f"Bundling embedding: {emb_name}")
+                    accelerator.print(f"Bundling embedding: {emb_name}, {embedding_to_token_ids[emb_name]}")
                     key = f"bundle_emb.{emb_name}.string_to_param.*"
                     state_dict[key] = embeddings_map[emb_name]
 
@@ -1076,7 +1074,7 @@ class NetworkTrainer:
                             # TODO: this is not optimal, might need to be refactored
                             for emb_name in embeddings_map.keys():
                                 emb_token_ids = embedding_to_token_ids[emb_name]
-                                updated_embs = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[emb_token_ids].data.detach().clone()
+                                updated_embs = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[emb_token_ids].detach().clone()
                                 embeddings_map[emb_name] = updated_embs
 
                 if args.scale_weight_norms:
