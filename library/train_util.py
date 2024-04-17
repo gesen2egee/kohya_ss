@@ -5319,10 +5319,11 @@ def sample_image_inference(
     prompt: str = prompt_dict.get("prompt", "")
     sampler_name: str = prompt_dict.get("sample_sampler", args.sample_sampler)
 
-    if prompt_replacement is not None:
-        prompt = prompt.replace(prompt_replacement[0], prompt_replacement[1])
-        if negative_prompt is not None:
-            negative_prompt = negative_prompt.replace(prompt_replacement[0], prompt_replacement[1])
+    if len(prompt_replacement) > 0:
+        for to_replace, replaced_by  in prompt_replacement:
+            prompt = prompt.replace(to_replace, replaced_by)
+            if negative_prompt is not None:
+                negative_prompt = negative_prompt.replace(to_replace, replaced_by)
 
     if seed is not None:
         torch.manual_seed(seed)
