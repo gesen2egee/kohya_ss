@@ -24,7 +24,7 @@
 # this is for onnx:
 # this is for onnx: 
 # timm==0.6.12ge
-accelerate==0.29.2
+git+https://github.com/huggingface/accelerate.git@main#egg=accelerate
 aiofiles==23.2.1
 altair==4.2.2
 beartype
