@@ -19,6 +19,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    Iterable,
 )
 from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs, PartialState
 import glob
@@ -81,6 +82,7 @@ logger = logging.getLogger(__name__)
 # from library.attention_processors import FlashAttnProcessor
 # from library.hypernetwork import replace_attentions_for_hypernetwork
 from library.original_unet import UNet2DConditionModel
+import contextlib
 
 # Tokenizer: checkpointから読み込むのではなくあらかじめ提供されているものを使う
 TOKENIZER_PATH = "openai/clip-vit-large-patch14"
@@ -2590,6 +2592,135 @@ def load_text_encoder_outputs_from_disk(npz_path):
 
 # endregion
 
+
+# based mostly on https://github.com/fadel/pytorch_ema/blob/master/torch_ema/ema.py
+class EMAModel:
+    """
+    Maintains (exponential) moving average of a set of parameters.
+    """
+    def __init__(self, parameters: Iterable[torch.nn.Parameter], decay: float, beta=0, max_train_steps=10000):
+        parameters = self.get_params_list(parameters)
+        self.shadow_params = [p.clone().detach() for p in parameters]
+        if decay < 0.0 or decay > 1.0:
+            raise ValueError('Decay must be between 0 and 1')
+        self.decay = decay
+        self.optimization_step = 0
+        self.collected_params = None
+        if beta < 0:
+            raise ValueError('ema_exp_beta should be > 0')
+        self.beta = beta
+        self.max_train_steps = max_train_steps
+        print(f"len(self.shadow_params): {len(self.shadow_params)}")
+
+    def get_params_list(self, parameters: Iterable[torch.nn.Parameter]):
+        parameters = list(parameters)
+        if isinstance(parameters[0], dict):
+            params_list = []
+            for m in parameters:
+                params_list.extend(list(m["params"]))
+            return params_list
+        else:
+            return parameters
+
+    def get_decay(self, optimization_step: int) -> float:
+        """
+        Get current decay for the exponential moving average.
+        """
+        if self.beta == 0:
+            return min(self.decay, (1 + optimization_step) / (10 + optimization_step))
+        else:
+            # exponential schedule. scales to max_train_steps
+            x = optimization_step / self.max_train_steps
+            return min(self.decay, self.decay * (1 - np.exp(-x * self.beta)))
+
+    def step(self, parameters: Iterable[torch.nn.Parameter]) -> None:
+        """
+        Update currently maintained parameters.
+
+        Call this every time the parameters are updated, such as the result of
+        the `optimizer.step()` call.
+        """
+        parameters = self.get_params_list(parameters)
+        one_minus_decay = 1.0 - self.get_decay(self.optimization_step)
+        self.optimization_step += 1
+        #print(f" {one_minus_decay}")
+        #with torch.no_grad():
+        for s_param, param in zip(self.shadow_params, parameters, strict=True):
+            tmp = (s_param - param)
+            #print(torch.sum(tmp))
+            # tmp will be a new tensor so we can do in-place
+            tmp.mul_(one_minus_decay)
+            s_param.sub_(tmp)
+
+    def copy_to(self, parameters: Iterable[torch.nn.Parameter] = None) -> None:
+        """
+        Copy current averaged parameters into given collection of parameters.
+        """
+        parameters = self.get_params_list(parameters)
+        for s_param, param in zip(self.shadow_params, parameters, strict=True):
+            # print(f"diff: {torch.sum(s_param) - torch.sum(param)}")
+            param.data.copy_(s_param.data)
+
+    def to(self, device=None, dtype=None) -> None:
+        r"""Move internal buffers of the ExponentialMovingAverage to `device`.
+        """
+        self.shadow_params = [
+            p.to(device=device, dtype=dtype) 
+            if p.is_floating_point() 
+            else p.to(device=device)
+            for p in self.shadow_params
+        ]
+        return
+
+    def store(self, parameters: Iterable[torch.nn.Parameter] = None) -> None:
+            """
+            Save the current parameters for restoring later.
+            """
+            parameters = self.get_params_list(parameters)
+            self.collected_params = [
+                param.clone()
+                for param in parameters
+            ]
+
+    def restore(self, parameters: Iterable[torch.nn.Parameter] = None) -> None:
+        """
+        Restore the parameters stored with the `store` method.
+        Useful to validate the model with EMA parameters without affecting the
+        original optimization process. Store the parameters before the
+        `copy_to` method. After validation (or model saving), use this to
+        restore the former parameters.
+        """
+        if self.collected_params is None:
+            raise RuntimeError(
+                "This ExponentialMovingAverage has no `store()`ed weights "
+                "to `restore()`"
+            )
+        parameters = self.get_params_list(parameters)
+        for c_param, param in zip(self.collected_params, parameters, strict=True):
+            param.data.copy_(c_param.data)
+
+    @contextlib.contextmanager
+    def ema_parameters(self, parameters: Iterable[torch.nn.Parameter] = None):
+        r"""
+        Context manager for validation/inference with averaged parameters.
+
+        Equivalent to:
+            ema.store()
+            ema.copy_to()
+            try:
+                ...
+            finally:
+                ema.restore()
+        """
+        parameters = self.get_params_list(parameters)
+        self.store(parameters)
+        self.copy_to(parameters)
+        try:
+            yield
+        finally:
+            self.restore(parameters)
+
+
 # region モジュール入れ替え部
 """
 高速化のためのモジュール入れ替え
@@ -3308,6 +3439,19 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
     #     default=None,
     #     help="enable perlin noise and set the octaves / perlin noiseを有効にしてoctavesをこの値に設定する",
     # )
+    parser.add_argument(
+        "--enable_ema", action="store_true", help="Enable EMA (Exponential Moving Average) of model parameters / モデルパラメータのEMA（指数移動平均）を有効にする "
+    )
+    parser.add_argument(
+        "--ema_decay", type=float, default=0.999, help="Max EMA decay. Typical values: 0.999 - 0.9999 / 最大EMA減衰。標準的な値： 0.999 - 0.9999 "
+    )
+    parser.add_argument(
+        "--ema_exp_beta", type=float, default=15, help="Choose EMA decay schedule. By default: (1+x)/(10+x). If beta is set: use exponential schedule scaled to max_train_steps. If beta>0, recommended values are around 10-15 "
+        + "/ EMAの減衰スケジュールを設定する。デフォルト：(1+x)/(10+x)。beta が設定されている場合: max_train_steps にスケーリングされた指数スケジュールを使用する。beta>0 の場合、推奨値は 10-15 程度。 "
+    )
+    parser.add_argument(
+        "--ema_save_only_ema_weights", action="store_true", help="By default both EMA and non-EMA weights are saved. If enabled, saves only EMA / デフォルトでは、EMAウェイトと非EMAウェイトの両方が保存される。有効にすると、EMAのみが保存される "
+    )
     parser.add_argument(
         "--multires_noise_discount",
         type=float,
