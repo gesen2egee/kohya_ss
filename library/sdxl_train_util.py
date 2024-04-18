@@ -286,8 +286,6 @@ def save_sd_model_on_epoch_end_or_stepwise(
     vae,
     logit_scale,
     ckpt_info,
-    ema = None,
-    params_to_replace = None,
 ):
     def sd_saver(ckpt_file, epoch_no, global_step):
         sai_metadata = train_util.get_sai_model_spec(None, args, True, False, False, is_stable_diffusion_ckpt=True)
@@ -317,10 +315,6 @@ def save_sd_model_on_epoch_end_or_stepwise(
             save_dtype=save_dtype,
         )
 
-    if args.enable_ema and not args.ema_save_only_ema_weights and ema:
-        temp_name = args.output_name
-        args.output_name = args.output_name + "-non-EMA"
-
     train_util.save_sd_model_on_epoch_end_or_stepwise_common(
         args,
         on_epoch_end,
@@ -333,22 +327,6 @@ def save_sd_model_on_epoch_end_or_stepwise(
         sd_saver,
         diffusers_saver,
     )
-    args.output_name = temp_name if temp_name else args.output_name
-    if args.enable_ema and ema:
-        with ema.ema_parameters(params_to_replace):
-            print("Saving EMA:")
-            train_util.save_sd_model_on_epoch_end_or_stepwise_common(
-                args,
-                on_epoch_end,
-                accelerator,
-                save_stable_diffusion_format,
-                use_safetensors,
-                epoch,
-                num_train_epochs,
-                global_step,
-                sd_saver,
-                diffusers_saver,
-            )
 
 
 def add_sdxl_training_arguments(parser: argparse.ArgumentParser):

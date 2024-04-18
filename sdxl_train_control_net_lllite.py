@@ -285,9 +285,6 @@ def train(args):
 
     unet.to(weight_dtype)
 
-    if args.enable_ema:
-        print("--enable_ema not supported in this script yet. Training without EMA. / --enable_ema このスクリプトではサポートされていません。トレーニングはEMAなしで行われる ")
-
     # acceleratorがなんかよろしくやってくれるらしい
     if args.optimizer_type.lower().endswith("scheduleFree"):
         unet, optimizer, train_dataloader = accelerator.prepare(unet, optimizer, train_dataloader)
