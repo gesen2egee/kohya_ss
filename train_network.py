@@ -173,41 +173,41 @@ class NetworkTrainer:
 
         total_loss = 0.0
         timesteps_list = [10, 350, 500, 650, 990]    
-        with torch.no_grad():
-            if "latents" in batch and batch["latents"] is not None:
-                latents = batch["latents"].to(accelerator.device)
-            else:
+        if "latents" in batch and batch["latents"] is not None:
+            latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+        else:
+            with torch.no_grad():
                 # latentに変換
-                latents = vae.encode(batch["images"].to(accelerator.device, dtype=vae_dtype)).latent_dist.sample()
+                latents = vae.encode(batch["images"].to(dtype=vae_dtype)).latent_dist.sample().to(dtype=weight_dtype)
 
                 # NaNが含まれていれば警告を表示し0に置き換える
                 if torch.any(torch.isnan(latents)):
                     accelerator.print("NaN found in latents, replacing with zeros")
-                    latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
-            latents = latents * self.vae_scale_factor
-        b_size = latents.shape[0]
+                    latents = torch.nan_to_num(latents, 0, out=latents)
+        latents = latents * self.vae_scale_factor
 
-        with torch.set_grad_enabled(is_train and train_text_encoder), accelerator.autocast():
+        with torch.set_grad_enabled(False), accelerator.autocast():
             # Get the text embedding for conditioning
             if args.weighted_captions:
-                text_encoder_conds = get_weighted_text_embeddings(
-                    tokenizers[0],
-                    text_encoders[0],
-                    batch["captions"],
-                    accelerator.device,
-                    args.max_token_length // 75 if args.max_token_length else 1,
-                    clip_skip=args.clip_skip,
-                )
-            else:
-                text_encoder_conds = self.get_text_cond(
-                    args, accelerator, batch, tokenizers, text_encoders, weight_dtype
-                )
+                if args.weighted_captions:
+                    text_encoder_conds = get_weighted_text_embeddings(
+                        tokenizer,
+                        text_encoder,
+                        batch["captions"],
+                        accelerator.device,
+                        args.max_token_length // 75 if args.max_token_length else 1,
+                        clip_skip=args.clip_skip,
+                    )
+                else:
+                    text_encoder_conds = self.get_text_cond(
+                        args, accelerator, batch, tokenizers, text_encoders, weight_dtype
+                    )
 
         # Sample noise, sample a random timestep for each image, and add noise to the latents,
         # with noise offset and/or multires noise if specified
         
         for fixed_timesteps in timesteps_list:
-            with torch.set_grad_enabled(is_train), accelerator.autocast():
+            with torch.set_grad_enabled(False), accelerator.autocast():
                 noise = torch.randn_like(latents, device=latents.device)
                 b_size = latents.shape[0]
                 timesteps = torch.full((b_size,), fixed_timesteps, dtype=torch.long, device=latents.device)
@@ -1059,7 +1059,6 @@ class NetworkTrainer:
                 current_step.value = global_step
                 with accelerator.accumulate(training_model):
                     on_step_start(text_encoder, unet)                    
-                    is_train = True
                     if "latents" in batch and batch["latents"] is not None:
                         latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
                     else:
@@ -1084,7 +1083,7 @@ class NetworkTrainer:
                         # print(f"set multiplier: {multipliers}")
                         accelerator.unwrap_model(network).set_multiplier(multipliers)
 
-                    with torch.set_grad_enabled(is_train and (train_text_encoder or args.continue_inversion)), accelerator.autocast():
+                    with torch.set_grad_enabled(train_text_encoder or args.continue_inversion), accelerator.autocast():
 
                         # Get the text embedding for conditioning
                         if args.weighted_captions:
@@ -1115,7 +1114,7 @@ class NetworkTrainer:
                             t.requires_grad_(True)
 
                     # Predict the noise residual
-                    with torch.set_grad_enabled(is_train), accelerator.autocast():
+                    with accelerator.autocast():
                         noise_pred = self.call_unet(
                             args,
                             accelerator,
