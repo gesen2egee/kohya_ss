@@ -629,10 +629,11 @@ class NetworkTrainer:
         if args.continue_inversion:
             token_ids_list = []
             for emb_name in embeddings_map.keys():
-                token_ids_group = []
-                for sublist in embedding_to_token_ids[emb_name]:
-                    token_ids_group.extend(sublist)
-                token_ids_list.append(token_ids_group)
+                for i, sublist in enumerate(embedding_to_token_ids[emb_name]):
+                    if i >= len(token_ids_list):
+                        token_ids_list.append(sublist)
+                    else:
+                        token_ids_list[i].extend(sublist)
             index_no_updates_list = []
             orig_embeds_params_list = []
             for tokenizer, token_ids, t_enc in zip(tokenizers, token_ids_list, text_encoders):
