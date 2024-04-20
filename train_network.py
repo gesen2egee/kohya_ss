@@ -46,7 +46,7 @@ import logging
 import itertools
 
 logger = logging.getLogger(__name__)
-
+prompt_replacements = []
 
 class NetworkTrainer:
     def __init__(self):
