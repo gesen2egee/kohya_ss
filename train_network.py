@@ -53,9 +53,9 @@ class NetworkTrainer:
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
-        self, args: argparse.Namespace, current_loss, avr_loss, lr_scheduler, keys_scaled=None, mean_norm=None, maximum_norm=None
+        self, args: argparse.Namespace, current_loss, avr_loss, lr_scheduler, keys_scaled=None, mean_norm=None, maximum_norm=None, extra={}
     ):
-        logs = {"loss/current": current_loss, "loss/average": avr_loss}
+        logs = {"loss/current": current_loss, "loss/average": avr_loss, **extra}
 
         if keys_scaled is not None:
             logs["max_norm/keys_scaled"] = keys_scaled
@@ -802,6 +802,7 @@ class NetworkTrainer:
             accelerator.unwrap_model(network).on_epoch_start(text_encoder, unet)
 
             for step, batch in enumerate(train_dataloader):
+                step_logs = {}
                 current_step.value = global_step
                 with accelerator.accumulate(training_model):
                     on_step_start(text_encoder, unet)
@@ -897,6 +898,15 @@ class NetworkTrainer:
                     if args.debiased_estimation_loss:
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
 
+                    kl_loss = train_util.kl_div_loss(noise, noise_pred, weight=0.1)
+                    loss = loss + kl_loss
+                    step_logs["loss/kl_loss"] = kl_loss.mean().item()
+
+                    pred_std, pred_skews, pred_kurtoses = train_util.noise_stats(noise_pred)
+                    step_logs["metrics/noise_pred_std"] = pred_std.mean().item()
+                    step_logs["metrics/noise_pred_skew"] = pred_skews.mean().item()
+                    step_logs["metrics/noise_pred_kurt"] = pred_kurtoses.mean().item()
+
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
                     accelerator.backward(loss)
@@ -950,7 +960,7 @@ class NetworkTrainer:
                     progress_bar.set_postfix(**{**max_mean_logs, **logs})
 
                 if args.logging_dir is not None:
-                    logs = self.generate_step_logs(args, current_loss, avr_loss, lr_scheduler, keys_scaled, mean_norm, maximum_norm)
+                    logs = self.generate_step_logs(args, current_loss, avr_loss, lr_scheduler, keys_scaled, mean_norm, maximum_norm, step_logs)
                     accelerator.log(logs, step=global_step)
 
                 if global_step >= args.max_train_steps:

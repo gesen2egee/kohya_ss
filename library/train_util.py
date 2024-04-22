@@ -3357,6 +3357,13 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         default=None,
         help="tags for model metadata, separated by comma / メタデータに書き込まれるモデルタグ、カンマ区切り",
     )
+    parser.add_argument(
+        "--kl_div_loss_weight",
+        type=float,
+        default=None,
+        help="KL divergence loss weight for training. Suggested range is 0.01..0.1 / 学習時のKL divergence lossの重み。推奨範囲は0.01..0.1",
+    )
+
 
     if support_dreambooth:
         # DreamBooth training
@@ -4930,6 +4937,36 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents):
 
     return noise, noisy_latents, timesteps, huber_c
 
+
+# Compute the KL divergence between the predicted noise and the true noise
+#
+# noise: the true noise
+# noise_pred: the predicted noise
+# weight: the weight to apply to the KL divergence. This should be chosen to be roughly the same magnitude as the MSE loss. A good starting point is 0.01.
+# bins: the number of bins to use when computing the KL divergence. If None, the number of bins will be the square root of the number of elements in each noise tensor.
+def kl_div_loss(noise, noise_pred, weight=0.01, bins=None):
+    p1s = []
+    p2s = []
+    eps = 1e-8
+    if bins is None:
+        bins = int(math.sqrt(noise[0].numel()))
+    for i, v in enumerate(noise_pred):
+        n = noise[i]
+        p1s.append(torch.histc(v.float(), bins=bins, min=n.min(), max=n.max()) + eps)
+        p2s.append(torch.histc(n.float(), bins=bins) + eps)
+    p1 = torch.stack(p1s)
+    p2 = torch.stack(p2s)
+
+    return torch.nn.functional.kl_div(p1.log(), p2, reduction="none").mean(dim=1).to(dtype=noise.dtype) * weight
+
+
+def noise_stats(noise):
+    diff     = noise - noise.mean(dim=(1,2,3), keepdim=True)
+    std      = noise.std(dim=(1,2,3))
+    zscores  = diff / noise.std(dim=(1,2,3), keepdim=True)
+    skews    = (zscores**3).mean(dim=(1,2,3))
+    kurtoses = (zscores**4).mean(dim=(1,2,3)) - 3.0
+    return std, skews, kurtoses
 
 # NOTE: if you're using the scheduled version, huber_c has to depend on the timesteps already
 def conditional_loss(
