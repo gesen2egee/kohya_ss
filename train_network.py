@@ -898,14 +898,29 @@ class NetworkTrainer:
                     if args.debiased_estimation_loss:
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
 
-                    kl_loss = train_util.kl_div_loss(noise, noise_pred, weight=0.1)
-                    loss = loss + kl_loss
-                    step_logs["loss/kl_loss"] = kl_loss.mean().item()
+                    if args.kl_div_loss_weight is not None:
+                        kl_loss = train_util.kl_div_loss(noise, noise_pred, weight=args.kl_div_loss_weight)
+                        loss = loss + kl_loss
+                        step_logs["loss/kl_loss"] = kl_loss.mean().item()
 
                     pred_std, pred_skews, pred_kurtoses = train_util.noise_stats(noise_pred)
-                    step_logs["metrics/noise_pred_std"] = pred_std.mean().item()
-                    step_logs["metrics/noise_pred_skew"] = pred_skews.mean().item()
-                    step_logs["metrics/noise_pred_kurt"] = pred_kurtoses.mean().item()
+                    true_std, true_skews, true_kurtoses = train_util.noise_stats(noise)
+
+                    if args.std_loss_weight is not None:
+                        std_loss  = torch.nn.functional.mse_loss(pred_std, true_std, reduction="none") * args.std_loss_weight
+                        loss = loss + std_loss
+
+                    if args.skew_loss_weight is not None:
+                        skew_loss = torch.nn.functional.mse_loss(pred_skews, true_skews, reduction="none") * args.skew_loss_weight
+                        loss = loss + skew_loss
+
+                    if args.kurtosis_loss_weight is not None:
+                        kurtosis_loss = torch.nn.functional.mse_loss(pred_kurtoses, true_kurtoses, reduction="none") * args.kurtosis_loss_weight
+                        loss = loss + kurtosis_loss
+
+                    step_logs["metrics/std_divergence"]      = true_std.mean().item()      - pred_std.mean().item()
+                    step_logs["metrics/skew_divergence"]     = true_skews.mean().item()    - pred_skews.mean().item()
+                    step_logs["metrics/kurtosis_divergence"] = true_kurtoses.mean().item() - pred_kurtoses.mean().item()
 
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
