@@ -913,14 +913,6 @@ class NetworkTrainer:
                         std_loss = F.mse_loss(pred_std, true_std, reduction="none")
                         loss = loss + std_loss * args.std_loss_weight
 
-                    if args.skew_loss_weight is not None:
-                        skew_loss = F.mse_loss(pred_skews, true_skews, reduction="none")
-                        loss = loss + skew_loss * args.skew_loss_weight
-
-                    if args.kurtosis_loss_weight is not None:
-                        kurtosis_loss = F.mse_loss(pred_kurtoses, true_kurtoses, reduction="none")
-                        loss = loss + kurtosis_loss * args.kurtosis_loss_weight
-
                     # print(kl_loss.dtype, pred_std.dtype, noise_pred.dtype, true_std.dtype, pred_skews.dtype, true_skews.dtype, pred_kurtoses.dtype, true_kurtoses.dtype)
                     # step_logs["loss/kl_loss"]                = kl_loss.mean().item()
                     step_logs["metrics/noise_pred_std"]      = pred_std.mean().item()

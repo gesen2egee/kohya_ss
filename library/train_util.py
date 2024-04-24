@@ -3369,25 +3369,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         default=None,
         help="Weight for standard deviation loss. Encourages the model to learn noise with a stddev like the true noise. May prevent 'deep fry'. 1.0 is a good starting place.",
     )
-    parser.add_argument(
-        "--kurtosis_loss_weight",
-        type=float,
-        default=None,
-        help="Weight for kurtosis loss. Encourages the model to learn noise with a kurtosis like the true noise. Recommended if using std_loss_weight.",
-    )
-    parser.add_argument(
-        "--skew_loss_weight",
-        type=float,
-        default=None,
-        help="Weight for skew loss. Encourages the model to learn noise with a skew like the true noise. Recommended if using std_loss_weight.",
-    )
-    parser.add_argument(
-        "--latent_corruption",
-        type=float,
-        default=None,
-        help="latent corruption for training (default is None) / 学習時のlatent corruption（デフォルトはNone）",
-    )
-
 
     if support_dreambooth:
         # DreamBooth training
