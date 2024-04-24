@@ -5005,19 +5005,6 @@ def noise_stats(noise):
     return std, skews, kurtoses
 
 
-def stat_losses(noise, noise_pred, std_loss_weight=1.0, kl_loss_weight=0.004, skew_loss_weight=0.75, kurtosis_loss_weight=0.05):
-        std_pred, skew_pred, kurt_pred = noise_stats(noise_pred)
-        std_true, skew_true, kurt_true = noise_stats(noise)
-
-        std_loss  = torch.nn.functional.mse_loss(std_pred,  std_true,  reduction="none") * std_loss_weight
-        skew_loss = torch.nn.functional.mse_loss(skew_pred, skew_true, reduction="none") * skew_loss_weight
-        kurt_loss = torch.nn.functional.mse_loss(kurt_pred, kurt_true, reduction="none") * kurtosis_loss_weight
-
-        kl_loss = kl_div_loss(noise, noise_pred, weight=kl_loss_weight)
-
-        return std_loss, skew_loss, kurt_loss, kl_loss
-
-
 # NOTE: if you're using the scheduled version, huber_c has to depend on the timesteps already
 def conditional_loss(
     model_pred: torch.Tensor, target: torch.Tensor, reduction: str = "mean", loss_type: str = "l2", huber_c: float = 0.1
