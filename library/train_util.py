@@ -3358,12 +3358,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="tags for model metadata, separated by comma / メタデータに書き込まれるモデルタグ、カンマ区切り",
     )
     parser.add_argument(
-        "--kl_div_loss_weight",
-        type=float,
-        default=None,
-        help="KL divergence loss weight for training. Suggested range is 0.01..0.1 / 学習時のKL divergence lossの重み。推奨範囲は0.01..0.1",
-    )
-    parser.add_argument(
         "--std_loss_weight",
         type=float,
         default=None,
@@ -4947,40 +4941,6 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents):
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
     return noise, noisy_latents, timesteps, huber_c
-
-
-class SoftHistogram(torch.nn.Module):
-    def __init__(self, bins, min, max, sigma, device):
-        super(SoftHistogram, self).__init__()
-        self.bins = bins
-        self.min = min
-        self.max = max
-        self.sigma = sigma
-        self.delta = float(max - min) / float(bins)
-        self.centers = float(min) + self.delta * (torch.arange(bins, device=device).float() + 0.5)
-
-    def forward(self, x):
-        x = torch.unsqueeze(x, 0) - torch.unsqueeze(self.centers, 1)
-        x = torch.sigmoid(self.sigma * (x + self.delta/2)) - torch.sigmoid(self.sigma * (x - self.delta/2))
-        x = x.sum(dim=1)
-        return x
-
-
-# Compute the KL divergence between the predicted noise and the true noise
-# This uses soft histograms to estimate the PDF of each noise tensor, so that we get a differentiable result
-def kl_div_loss(noise, noise_pred, weight=0.01):
-    p1s = []
-    p2s = []
-    bins = int(math.sqrt(noise[0].numel()))
-    for i, p in enumerate(noise_pred):
-        n = noise[i]
-        h = SoftHistogram(bins, n.min().item(), n.max().item(), 1.0, noise.device)
-        p1s.append(torch.nn.functional.log_softmax(h(p.view(-1) + 1e-8), dim=0))
-        p2s.append(torch.nn.functional.log_softmax(h(n.view(-1) + 1e-8), dim=0))
-    p1 = torch.stack(p1s)
-    p2 = torch.stack(p2s)
-
-    return torch.nn.functional.kl_div(p1, p2, reduction="none", log_target=True).mean(dim=1).to(dtype=noise.dtype) * weight
 
 
 def noise_stats(noise):

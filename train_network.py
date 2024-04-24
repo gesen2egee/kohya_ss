@@ -902,19 +902,13 @@ class NetworkTrainer:
                     if args.debiased_estimation_loss:
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
 
-                    # kl_loss = train_util.kl_div_loss(noise, noise_pred)
                     pred_std, pred_skews, pred_kurtoses = train_util.noise_stats(noise_pred * noise_mask)
                     true_std, true_skews, true_kurtoses = train_util.noise_stats(noise * noise_mask)
-
-                    # if args.kl_div_loss_weight is not None:
-                    #     loss = loss + kl_loss * args.kl_div_loss_weight
 
                     if args.std_loss_weight is not None:
                         std_loss = F.mse_loss(pred_std, true_std, reduction="none")
                         loss = loss + std_loss * args.std_loss_weight
 
-                    # print(kl_loss.dtype, pred_std.dtype, noise_pred.dtype, true_std.dtype, pred_skews.dtype, true_skews.dtype, pred_kurtoses.dtype, true_kurtoses.dtype)
-                    # step_logs["loss/kl_loss"]                = kl_loss.mean().item()
                     step_logs["metrics/noise_pred_std"]      = pred_std.mean().item()
                     step_logs["metrics/noise_pred_mean"]     = noise_pred.mean()
                     step_logs["metrics/std_divergence"]      = true_std.mean().item()      - pred_std.mean().item()
