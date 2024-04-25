@@ -1136,8 +1136,12 @@ class NetworkTrainer:
                     loss = train_util.conditional_loss(
                         noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
                     )
-                    if args.masked_loss:
-                        loss = apply_masked_loss(loss, batch)
+
+                    if args.masked_loss and np.random.rand() < args.masked_loss_prob:
+                        loss, noise_mask = apply_masked_loss(loss, batch)
+                    else:
+                        noise_mask = torch.ones_like(noise, device=noise.device)
+
                     loss = loss.mean([1, 2, 3])
 
                     loss_weights = batch["loss_weights"]  # 各sampleごとのweight
@@ -1152,26 +1156,15 @@ class NetworkTrainer:
                     if args.debiased_estimation_loss:
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
 
-                    if args.kl_div_loss_weight is not None:
-                        kl_loss = train_util.kl_div_loss(noise, noise_pred, weight=args.kl_div_loss_weight)
-                        loss = loss + kl_loss
-                        step_logs["loss/kl_loss"] = kl_loss.mean().item()
-
-                    pred_std, pred_skews, pred_kurtoses = train_util.noise_stats(noise_pred)
-                    true_std, true_skews, true_kurtoses = train_util.noise_stats(noise)
+                    pred_std, pred_skews, pred_kurtoses = train_util.noise_stats(noise_pred * noise_mask)
+                    true_std, true_skews, true_kurtoses = train_util.noise_stats(noise * noise_mask)
 
                     if args.std_loss_weight is not None:
-                        std_loss  = torch.nn.functional.mse_loss(pred_std, true_std, reduction="none") * args.std_loss_weight
-                        loss = loss + std_loss
+                        std_loss = F.mse_loss(pred_std, true_std, reduction="none")
+                        loss = loss + std_loss * args.std_loss_weight
 
-                    if args.skew_loss_weight is not None:
-                        skew_loss = torch.nn.functional.mse_loss(pred_skews, true_skews, reduction="none") * args.skew_loss_weight
-                        loss = loss + skew_loss
-
-                    if args.kurtosis_loss_weight is not None:
-                        kurtosis_loss = torch.nn.functional.mse_loss(pred_kurtoses, true_kurtoses, reduction="none") * args.kurtosis_loss_weight
-                        loss = loss + kurtosis_loss
-
+                    step_logs["metrics/noise_pred_std"]      = pred_std.mean().item()
+                    step_logs["metrics/noise_pred_mean"]     = noise_pred.mean()
                     step_logs["metrics/std_divergence"]      = true_std.mean().item()      - pred_std.mean().item()
                     step_logs["metrics/skew_divergence"]     = true_skews.mean().item()    - pred_skews.mean().item()
                     step_logs["metrics/kurtosis_divergence"] = true_kurtoses.mean().item() - pred_kurtoses.mean().item()

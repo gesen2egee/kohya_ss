@@ -3,6 +3,12 @@ import argparse
 import random
 import re
 from typing import List, Optional, Union
+from .utils import setup_logging
+
+setup_logging()
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def prepare_scheduler_for_custom_training(noise_scheduler, device):
@@ -21,7 +27,7 @@ def prepare_scheduler_for_custom_training(noise_scheduler, device):
 
 def fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler):
     # fix beta: zero terminal SNR
-    print(f"fix noise scheduler betas: https://arxiv.org/abs/2305.08891")
+    logger.info(f"fix noise scheduler betas: https://arxiv.org/abs/2305.08891")
 
     def enforce_zero_terminal_snr(betas):
         # Convert betas to alphas_bar_sqrt
@@ -49,8 +55,8 @@ def fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler):
     alphas = 1.0 - betas
     alphas_cumprod = torch.cumprod(alphas, dim=0)
 
-    # print("original:", noise_scheduler.betas)
-    # print("fixed:", betas)
+    # logger.info(f"original: {noise_scheduler.betas}")
+    # logger.info(f"fixed: {betas}")
 
     noise_scheduler.betas = betas
     noise_scheduler.alphas = alphas
@@ -61,19 +67,17 @@ def apply_snr_weight(loss, timesteps, noise_scheduler, gamma, v_prediction=False
     snr = torch.stack([noise_scheduler.all_snr[t] for t in timesteps])
     min_snr_gamma = torch.minimum(snr, torch.full_like(snr, gamma))
     if v_prediction:
-        snr_weight = torch.div(min_snr_gamma, snr+1).float().to(loss.device)
+        snr_weight = torch.div(min_snr_gamma, snr + 1).float().to(loss.device)
     else:
         snr_weight = torch.div(min_snr_gamma, snr).float().to(loss.device)
     loss = loss * snr_weight
     return loss
-
 
 def apply_soft_snr_weight(loss, timesteps, noise_scheduler, gamma, v_prediction=False):
     snr = torch.stack([noise_scheduler.all_snr[t] for t in timesteps])
     soft_min_snr_gamma_weight = 1 / (torch.pow(snr if v_prediction is False else snr + 1, 2) + (1 / float(gamma)))
     loss = loss * soft_min_snr_gamma_weight
     return loss
-
 
 def scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler):
     scale = get_snr_scale(timesteps, noise_scheduler)
@@ -86,22 +90,24 @@ def get_snr_scale(timesteps, noise_scheduler):
     snr_t = torch.minimum(snr_t, torch.ones_like(snr_t) * 1000)  # if timestep is 0, snr_t is inf, so limit it to 1000
     scale = snr_t / (snr_t + 1)
     # # show debug info
-    # print(f"timesteps: {timesteps}, snr_t: {snr_t}, scale: {scale}")
+    # logger.info(f"timesteps: {timesteps}, snr_t: {snr_t}, scale: {scale}")
     return scale
 
 
 def add_v_prediction_like_loss(loss, timesteps, noise_scheduler, v_pred_like_loss):
     scale = get_snr_scale(timesteps, noise_scheduler)
-    # print(f"add v-prediction like loss: {v_pred_like_loss}, scale: {scale}, loss: {loss}, time: {timesteps}")
+    # logger.info(f"add v-prediction like loss: {v_pred_like_loss}, scale: {scale}, loss: {loss}, time: {timesteps}")
     loss = loss + loss / scale * v_pred_like_loss
     return loss
+
 
 def apply_debiased_estimation(loss, timesteps, noise_scheduler):
     snr_t = torch.stack([noise_scheduler.all_snr[t] for t in timesteps])  # batch_size
     snr_t = torch.minimum(snr_t, torch.ones_like(snr_t) * 1000)  # if timestep is 0, snr_t is inf, so limit it to 1000
-    weight = 1/torch.sqrt(snr_t)
+    weight = 1 / torch.sqrt(snr_t)
     loss = weight * loss
     return loss
+
 
 # TODO train_utilと分散しているのでどちらかに寄せる
 
@@ -281,7 +287,7 @@ def get_prompts_with_weights(tokenizer, prompt: List[str], max_length: int):
         tokens.append(text_token)
         weights.append(text_weight)
     if truncated:
-        print("Prompt was truncated. Try to shorten the prompt or increase max_embeddings_multiples")
+        logger.warning("Prompt was truncated. Try to shorten the prompt or increase max_embeddings_multiples")
     return tokens, weights
 
 
@@ -483,6 +489,7 @@ def apply_noise_offset(latents, noise, noise_offset, adaptive_noise_scale):
     noise = noise + noise_offset * torch.randn((latents.shape[0], latents.shape[1], 1, 1), device=latents.device)
     return noise
 
+
 def apply_masked_loss(loss, batch):
     # mask image is -1 to 1. we need to convert it to 0 to 1
     mask_image = batch["conditioning_images"].to(dtype=loss.dtype)[:, 0].unsqueeze(1)  # use R channel
@@ -491,7 +498,8 @@ def apply_masked_loss(loss, batch):
     mask_image = torch.nn.functional.interpolate(mask_image, size=loss.shape[2:], mode="area")
     mask_image = mask_image / 2 + 0.5
     loss = loss * mask_image
-    return loss
+    return loss, mask_image
+
 
 """
 ##########################################
