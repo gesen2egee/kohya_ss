@@ -1160,6 +1160,7 @@ class NetworkTrainer:
                     true_std, true_skews, true_kurtoses = train_util.noise_stats(noise * noise_mask)
 
                     if args.std_loss_weight is not None:
+                        args.std_loss_weight  = (timesteps / 1000.0) ** 3
                         std_loss = torch.nn.functional.mse_loss(pred_std, true_std, reduction="none")
                         loss = loss + std_loss * args.std_loss_weight
 
