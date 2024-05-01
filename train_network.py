@@ -1132,11 +1132,20 @@ class NetworkTrainer:
                     else:
                         target = noise
 
-                    loss = train_util.conditional_loss(
-                        noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
-                    )
-                    if args.masked_loss:
+                    ##loss = train_util.conditional_loss(
+                    #    noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                    #)
+                    alphas_cumprod = noise_scheduler.alphas_cumprod.to(accelerator.device)
+                    mse_loss = torch.nn.functional.mse_loss(noise_pred, target, reduction="none")
+                    base_loss = 1/-mse_loss.exp() + 1
+
+                    ac = alphas_cumprod[timesteps]
+                    loss = base_loss.mean(dim=(2, 3), keepdims=True) * ac.sqrt()
+                    loss = loss + base_loss.std(dim=(2,3), keepdims=True) * (1-ac).sqrt()
+
+                    if args.masked_loss and np.random.rand() < args.masked_loss_prob:
                         loss = apply_masked_loss(loss, batch)
+                    
                     loss = loss.mean([1, 2, 3])
 
                     loss_weights = batch["loss_weights"]  # 各sampleごとのweight
