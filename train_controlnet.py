@@ -11,7 +11,9 @@ import toml
 from tqdm import tqdm
 
 import torch
+from library import deepspeed_utils
 from library.device_utils import init_ipex, clean_memory_on_device
+
 init_ipex()
 
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -225,7 +227,7 @@ def train(args):
             )
         vae.to("cpu")
         clean_memory_on_device(accelerator.device)
-        
+
         accelerator.wait_for_everyone()
 
     if args.gradient_checkpointing:
@@ -275,9 +277,18 @@ def train(args):
         controlnet.to(weight_dtype)
 
     # acceleratorがなんかよろしくやってくれるらしい
-    controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        controlnet, optimizer, train_dataloader, lr_scheduler
-    )
+    use_schedule_free_optimizer = args.optimizer_type.lower().endswith("schedulefree")
+    controlnet, optimizer, train_dataloader = accelerator.prepare(controlnet, optimizer, train_dataloader)
+    if not use_schedule_free_optimizer:
+        lr_scheduler = accelerator.prepare(lr_scheduler)
+
+    # make lambda function for calling optimizer.train() and optimizer.eval() if schedule-free optimizer is used
+    if use_schedule_free_optimizer:
+        optimizer_train_if_needed = lambda: (optimizer.optimizer if hasattr(optimizer, "optimizer") else optimizer).train()
+        optimizer_eval_if_needed = lambda: (optimizer.optimizer if hasattr(optimizer, "optimizer") else optimizer).eval()
+    else:
+        optimizer_train_if_needed = lambda: None
+        optimizer_eval_if_needed = lambda: None
 
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
@@ -392,11 +403,12 @@ def train(args):
         current_epoch.value = epoch + 1
 
         for step, batch in enumerate(train_dataloader):
+            optimizer_train_if_needed()
             current_step.value = global_step
             with accelerator.accumulate(controlnet):
                 with torch.no_grad():
                     if "latents" in batch and batch["latents"] is not None:
-                        latents = batch["latents"].to(accelerator.device)
+                        latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
                     else:
                         # latentに変換
                         latents = vae.encode(batch["images"].to(dtype=weight_dtype)).latent_dist.sample()
@@ -419,13 +431,10 @@ def train(args):
                     )
 
                 # Sample a random timestep for each image
-                timesteps = torch.randint(
-                    0,
-                    noise_scheduler.config.num_train_timesteps,
-                    (b_size,),
-                    device=latents.device,
+                timesteps, huber_c = train_util.get_timesteps_and_huber_c(
+                    args, 0, noise_scheduler.config.num_train_timesteps, noise_scheduler, b_size, latents.device
                 )
-                timesteps = timesteps.long()
+
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
@@ -456,7 +465,9 @@ def train(args):
                 else:
                     target = noise
 
-                loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
+                loss = train_util.conditional_loss(
+                    noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                )
                 loss = loss.mean([1, 2, 3])
 
                 loss_weights = batch["loss_weights"]  # 各sampleごとのweight
@@ -475,6 +486,8 @@ def train(args):
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+
+            optimizer_eval_if_needed()
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -565,7 +578,7 @@ def train(args):
 
     accelerator.end_training()
 
-    if is_main_process and args.save_state:
+    if is_main_process and (args.save_state or args.save_state_on_train_end):
         train_util.save_state_on_train_end(args, accelerator)
 
     # del accelerator  # この後メモリを使うのでこれは消す→printで使うので消さずにおく
@@ -584,6 +597,7 @@ def setup_parser() -> argparse.ArgumentParser:
     train_util.add_sd_models_arguments(parser)
     train_util.add_dataset_arguments(parser, False, True, True)
     train_util.add_training_arguments(parser, False)
+    deepspeed_utils.add_deepspeed_arguments(parser)
     train_util.add_optimizer_arguments(parser)
     config_util.add_config_arguments(parser)
     custom_train_functions.add_custom_train_arguments(parser)
@@ -615,6 +629,7 @@ if __name__ == "__main__":
     parser = setup_parser()
 
     args = parser.parse_args()
+    train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
 
     train(args)
