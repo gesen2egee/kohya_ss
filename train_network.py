@@ -890,10 +890,26 @@ class NetworkTrainer:
                         target = noise_scheduler.get_velocity(latents, noise, timesteps)
                     else:
                         target = noise
+                        
+                    if args.siginterp_variation_mse_loss:
+                        alphas_cumprod = noise_scheduler.alphas_cumprod.to(accelerator.device)
+                        ac = alphas_cumprod[timesteps]
+                        mse_loss = torch.nn.functional.mse_loss(noise_pred, target, reduction="none")
+                        base_loss = 1/-mse_loss.exp() + 1
+                        loss = base_loss.mean(dim=(2, 3), keepdims=True) * ac.sqrt()
+                        loss = loss + base_loss.std(dim=(2,3), keepdims=True) * (1-ac).sqrt()
+                    elif args.siginterp_variation_mae_loss:
+                        alphas_cumprod = noise_scheduler.alphas_cumprod.to(accelerator.device)
+                        ac = alphas_cumprod[timesteps]
+                        mae_loss = torch.nn.functional.l1_loss(noise_pred, target, reduction="none")
+                        base_loss = 1/-mae_loss.exp() + 1
+                        loss = base_loss.mean(dim=(2, 3), keepdims=True) * ac
+                        loss = loss + base_loss.std(dim=(2,3), keepdims=True) * (1-ac)                    
+                    else:
+                        loss = train_util.conditional_loss(
+                            noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                        )
 
-                    loss = train_util.conditional_loss(
-                        noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
-                    )
                     if args.masked_loss:
                         loss = apply_masked_loss(loss, batch)
                     loss = loss.mean([1, 2, 3])
@@ -1115,6 +1131,16 @@ def setup_parser() -> argparse.ArgumentParser:
         "--no_half_vae",
         action="store_true",
         help="do not use fp16/bf16 VAE in mixed precision (use float VAE) / mixed precisionでも fp16/bf16 VAEを使わずfloat VAEを使う",
+    )
+    parser.add_argument(
+        "--siginterp_variation_mse_loss",
+        action="store_true",
+        help="siginterp_variation_mse_loss",
+    )
+    parser.add_argument(
+        "--siginterp_variation_mae_loss",
+        action="store_true",
+        help="siginterp_variation_mae_loss",
     )
     return parser
 
