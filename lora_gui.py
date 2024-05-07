@@ -904,7 +904,6 @@ def train_model(
 
     run_cmd += run_cmd_advanced_training(
         adaptive_noise_scale=adaptive_noise_scale,
-        additional_parameters=additional_parameters,
         bucket_no_upscale=bucket_no_upscale,
         bucket_reso_steps=bucket_reso_steps,
         cache_latents=cache_latents,
@@ -961,7 +960,6 @@ def train_model(
         noise_offset=noise_offset,
         noise_offset_type=noise_offset_type,
         optimizer=optimizer,
-        optimizer_args=optimizer_args,
         output_dir=output_dir,
         output_name=output_name,
         persistent_data_loader_workers=persistent_data_loader_workers,
@@ -1006,6 +1004,11 @@ def train_model(
         output_dir,
     )
 
+    run_cmd += run_cmd_advanced_training(
+        optimizer_args=optimizer_args,
+        additional_parameters=additional_parameters,
+    )
+ 
     if print_only_bool:
         log.warning(
             "Here is the trainer command as a reference. It will not be executed:\n"
