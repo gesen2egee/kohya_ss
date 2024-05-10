@@ -3357,7 +3357,36 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         default=None,
         help="tags for model metadata, separated by comma / メタデータに書き込まれるモデルタグ、カンマ区切り",
     )
-
+    parser.add_argument(
+        "--kl_div_loss_weight",
+        type=float,
+        default=None,
+        help="KL divergence loss weight for training. Suggested range is 0.01..0.1 / 学習時のKL divergence lossの重み。推奨範囲は0.01..0.1",
+    )
+    parser.add_argument(
+        "--std_loss_weight",
+        type=float,
+        default=None,
+        help="Weight for standard deviation loss. Encourages the model to learn noise with a stddev like the true noise. May prevent 'deep fry'. 1.0 is a good starting place.",
+    )
+    parser.add_argument(
+        "--kurtosis_loss_weight",
+        type=float,
+        default=None,
+        help="Weight for kurtosis loss. Encourages the model to learn noise with a kurtosis like the true noise. Recommended if using std_loss_weight.",
+    )
+    parser.add_argument(
+        "--skew_loss_weight",
+        type=float,
+        default=None,
+        help="Weight for skew loss. Encourages the model to learn noise with a skew like the true noise. Recommended if using std_loss_weight.",
+    )
+    parser.add_argument(
+        "--latent_corruption",
+        type=float,
+        default=None,
+        help="latent corruption for training (default is None) / 学習時のlatent corruption（デフォルトはNone）",
+    )
     if support_dreambooth:
         # DreamBooth training
         parser.add_argument(
@@ -4953,6 +4982,60 @@ def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents):
 
     return noise, noisy_latents, timesteps, huber_c
 
+class SoftHistogram(torch.nn.Module):
+    def __init__(self, bins, min, max, sigma, device):
+        super(SoftHistogram, self).__init__()
+        self.bins = bins
+        self.min = min
+        self.max = max
+        self.sigma = sigma
+        self.delta = float(max - min) / float(bins)
+        self.centers = float(min) + self.delta * (torch.arange(bins, device=device).float() + 0.5)
+
+    def forward(self, x):
+        x = torch.unsqueeze(x, 0) - torch.unsqueeze(self.centers, 1)
+        x = torch.sigmoid(self.sigma * (x + self.delta/2)) - torch.sigmoid(self.sigma * (x - self.delta/2))
+        x = x.sum(dim=1)
+        return x
+
+
+# Compute the KL divergence between the predicted noise and the true noise
+# This uses soft histograms to estimate the PDF of each noise tensor, so that we get a differentiable result
+def kl_div_loss(noise, noise_pred, weight=0.01):
+    p1s = []
+    p2s = []
+    bins = int(math.sqrt(noise[0].numel()))
+    for i, p in enumerate(noise_pred):
+        n = noise[i]
+        h = SoftHistogram(bins, n.min().item(), n.max().item(), 1.0, noise.device)
+        p1s.append(torch.nn.functional.log_softmax(h(p.view(-1) + 1e-8), dim=0))
+        p2s.append(torch.nn.functional.log_softmax(h(n.view(-1) + 1e-8), dim=0))
+    p1 = torch.stack(p1s)
+    p2 = torch.stack(p2s)
+
+    return torch.nn.functional.kl_div(p1, p2, reduction="none", log_target=True).mean(dim=1).to(dtype=noise.dtype) * weight
+
+
+def noise_stats(noise):
+    diff     = noise - noise.mean(dim=(1,2,3), keepdim=True)
+    std      = noise.std(dim=(1,2,3))
+    zscores  = diff / std[:, None, None, None]
+    skews    = (zscores**3).mean(dim=(1,2,3))
+    kurtoses = (zscores**4).mean(dim=(1,2,3)) - 3.0
+    return std, skews, kurtoses
+
+
+def stat_losses(noise, noise_pred, std_loss_weight=1.0, kl_loss_weight=0.004, skew_loss_weight=0.75, kurtosis_loss_weight=0.05):
+        std_pred, skew_pred, kurt_pred = noise_stats(noise_pred)
+        std_true, skew_true, kurt_true = noise_stats(noise)
+
+        std_loss  = torch.nn.functional.mse_loss(std_pred,  std_true,  reduction="none") * std_loss_weight
+        skew_loss = torch.nn.functional.mse_loss(skew_pred, skew_true, reduction="none") * skew_loss_weight
+        kurt_loss = torch.nn.functional.mse_loss(kurt_pred, kurt_true, reduction="none") * kurtosis_loss_weight
+
+        kl_loss = kl_div_loss(noise, noise_pred, weight=kl_loss_weight)
+
+        return std_loss, skew_loss, kurt_loss, kl_loss
 
 # NOTE: if you're using the scheduled version, huber_c has to depend on the timesteps already
 def conditional_loss(

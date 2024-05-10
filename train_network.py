@@ -53,9 +53,9 @@ class NetworkTrainer:
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
-        self, args: argparse.Namespace, current_loss, avr_loss, lr_scheduler, keys_scaled=None, mean_norm=None, maximum_norm=None
+        self, args: argparse.Namespace, current_loss, avr_loss, lr_scheduler, keys_scaled=None, mean_norm=None, maximum_norm=None, extra={}
     ):
-        logs = {"loss/current": current_loss, "loss/average": avr_loss}
+        logs = {"loss/current": current_loss, "loss/average": avr_loss, **extra}
 
         if keys_scaled is not None:
             logs["max_norm/keys_scaled"] = keys_scaled
@@ -814,6 +814,7 @@ class NetworkTrainer:
             accelerator.unwrap_model(network).on_epoch_start(text_encoder, unet)
 
             for step, batch in enumerate(train_dataloader):
+                step_logs = {}
                 optimizer_train_if_needed()
                 current_step.value = global_step
                 with accelerator.accumulate(training_model):
@@ -925,6 +926,29 @@ class NetworkTrainer:
                         loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
                     if args.debiased_estimation_loss:
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
+                    if args.kl_div_loss_weight is not None:
+                        kl_loss = train_util.kl_div_loss(noise, noise_pred, weight=args.kl_div_loss_weight)
+                        loss = loss + kl_loss
+                        step_logs["loss/kl_loss"] = kl_loss.mean().item()
+
+                    pred_std, pred_skews, pred_kurtoses = train_util.noise_stats(noise_pred)
+                    true_std, true_skews, true_kurtoses = train_util.noise_stats(noise)
+
+                    if args.std_loss_weight is not None:
+                        std_loss  = torch.nn.functional.mse_loss(pred_std, true_std, reduction="none") * args.std_loss_weight
+                        loss = loss + std_loss
+
+                    if args.skew_loss_weight is not None:
+                        skew_loss = torch.nn.functional.mse_loss(pred_skews, true_skews, reduction="none") * args.skew_loss_weight
+                        loss = loss + skew_loss
+
+                    if args.kurtosis_loss_weight is not None:
+                        kurtosis_loss = torch.nn.functional.mse_loss(pred_kurtoses, true_kurtoses, reduction="none") * args.kurtosis_loss_weight
+                        loss = loss + kurtosis_loss
+
+                    step_logs["metrics/std_divergence"]      = true_std.mean().item()      - pred_std.mean().item()
+                    step_logs["metrics/skew_divergence"]     = true_skews.mean().item()    - pred_skews.mean().item()
+                    step_logs["metrics/kurtosis_divergence"] = true_kurtoses.mean().item() - pred_kurtoses.mean().item()
 
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
@@ -981,7 +1005,7 @@ class NetworkTrainer:
                     progress_bar.set_postfix(**{**max_mean_logs, **logs})
 
                 if args.logging_dir is not None:
-                    logs = self.generate_step_logs(args, current_loss, avr_loss, lr_scheduler, keys_scaled, mean_norm, maximum_norm)
+                    logs = self.generate_step_logs(args, current_loss, avr_loss, lr_scheduler, keys_scaled, mean_norm, maximum_norm, step_logs)
                     accelerator.log(logs, step=global_step)
 
                 if global_step >= args.max_train_steps:
