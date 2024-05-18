@@ -14,7 +14,7 @@ huggingface-hub==0.20.1
 imagesize==1.4.1
 invisible-watermark==0.2.0
 lion-pytorch==0.0.6
-lycoris_lora==2.0.2
+lycoris_lora==3.0.0.dev2
 omegaconf==2.3.0
 onnx==1.14.1
 onnxruntime-gpu==1.16.0
@@ -26,6 +26,7 @@ pytorch-lightning==1.9.0
 rich==13.7.0
 safetensors==0.4.2
 scipy==1.11.4
+schedulefree
 tensorboard
 timm==0.6.12
 tk==0.1.0
