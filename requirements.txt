@@ -14,7 +14,7 @@ huggingface-hub==0.20.1
 imagesize==1.4.1
 invisible-watermark==0.2.0
 lion-pytorch==0.0.6
-lycoris_lora==3.0.0
+lycoris_lora==3.0.0.dev6
 omegaconf==2.3.0
 onnx==1.14.1
 onnxruntime-gpu==1.16.0
