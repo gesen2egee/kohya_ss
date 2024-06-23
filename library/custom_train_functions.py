@@ -84,6 +84,12 @@ def scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_schedul
     loss = loss * scale
     return loss
 
+def apply_p2_weight(loss, timesteps, noise_scheduler, gamma, v_prediction=False):
+    snr = torch.stack([noise_scheduler.all_snr[t] for t in timesteps])
+    if v_prediction:
+        snr += 1.0
+    loss = loss * (1.0 + snr) ** -gamma
+    return loss
 
 def get_snr_scale(timesteps, noise_scheduler):
     snr_t = torch.stack([noise_scheduler.all_snr[t] for t in timesteps])  # batch_size

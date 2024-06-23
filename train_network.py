@@ -38,6 +38,7 @@ from library.custom_train_functions import (
     add_v_prediction_like_loss,
     apply_debiased_estimation,
     apply_masked_loss,
+    apply_p2_weight,
 )
 from library.utils import setup_logging, add_logging_arguments
 
@@ -865,7 +866,7 @@ class NetworkTrainer:
                     # Sample noise, sample a random timestep for each image, and add noise to the latents,
                     # with noise offset and/or multires noise if specified
                     noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(
-                        args, noise_scheduler, latents
+                        args, noise_scheduler, latents, global_step
                     )
 
                     # ensure the hidden state will require grad
@@ -932,7 +933,7 @@ class NetworkTrainer:
                         kl_loss = train_util.kl_div_loss(noise, noise_pred, weight=args.kl_div_loss_weight)
                         loss = loss + kl_loss
                         step_logs["loss/kl_loss"] = kl_loss.mean().item()
-
+                    #loss = apply_p2_weight(loss, timesteps, noise_scheduler, 1, args.v_parameterization)
                     pred_std, pred_skews, pred_kurtoses = train_util.noise_stats(noise_pred)
                     true_std, true_skews, true_kurtoses = train_util.noise_stats(noise)
 
