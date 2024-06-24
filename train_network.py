@@ -133,8 +133,8 @@ class NetworkTrainer:
             if param.grad is not None:
                 param.grad = accelerator.reduce(param.grad, reduction="mean")
 
-    def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet):
-        train_util.sample_images(accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet)
+    def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, example_tuple=None):
+        train_util.sample_images(accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, example_tuple)
 
     def train(self, args):
         session_id = random.randint(0, 2**32)
@@ -866,7 +866,7 @@ class NetworkTrainer:
                     # Sample noise, sample a random timestep for each image, and add noise to the latents,
                     # with noise offset and/or multires noise if specified
                     noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(
-                        args, noise_scheduler, latents, global_step
+                        args, noise_scheduler, latents
                     )
 
                     # ensure the hidden state will require grad
@@ -929,29 +929,29 @@ class NetworkTrainer:
                         loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
                     if args.debiased_estimation_loss:
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
-                    if args.kl_div_loss_weight is not None:
-                        kl_loss = train_util.kl_div_loss(noise, noise_pred, weight=args.kl_div_loss_weight)
-                        loss = loss + kl_loss
-                        step_logs["loss/kl_loss"] = kl_loss.mean().item()
+                    #if args.kl_div_loss_weight is not None:
+                    #    kl_loss = train_util.kl_div_loss(noise, noise_pred, weight=args.kl_div_loss_weight)
+                    #    loss = loss + kl_loss
+                    #    step_logs["loss/kl_loss"] = kl_loss.mean().item()
                     #loss = apply_p2_weight(loss, timesteps, noise_scheduler, 1, args.v_parameterization)
-                    pred_std, pred_skews, pred_kurtoses = train_util.noise_stats(noise_pred)
-                    true_std, true_skews, true_kurtoses = train_util.noise_stats(noise)
+                    #pred_std, pred_skews, pred_kurtoses = train_util.noise_stats(noise_pred)
+                    #true_std, true_skews, true_kurtoses = train_util.noise_stats(noise)
 
-                    if args.std_loss_weight is not None:
-                        std_loss  = torch.nn.functional.mse_loss(pred_std, true_std, reduction="none") * args.std_loss_weight
-                        loss = loss + std_loss
+                    #if args.std_loss_weight is not None:
+                    #    std_loss  = torch.nn.functional.mse_loss(pred_std, true_std, reduction="none") * args.std_loss_weight
+                    #    loss = loss + std_loss
 
-                    if args.skew_loss_weight is not None:
-                        skew_loss = torch.nn.functional.mse_loss(pred_skews, true_skews, reduction="none") * args.skew_loss_weight
-                        loss = loss + skew_loss
+                    #if args.skew_loss_weight is not None:
+                    #    skew_loss = torch.nn.functional.mse_loss(pred_skews, true_skews, reduction="none") * args.skew_loss_weight
+                    #    loss = loss + skew_loss
 
-                    if args.kurtosis_loss_weight is not None:
-                        kurtosis_loss = torch.nn.functional.mse_loss(pred_kurtoses, true_kurtoses, reduction="none") * args.kurtosis_loss_weight
-                        loss = loss + kurtosis_loss
+                    #if args.kurtosis_loss_weight is not None:
+                    #    kurtosis_loss = torch.nn.functional.mse_loss(pred_kurtoses, true_kurtoses, reduction="none") * args.kurtosis_loss_weight
+                    #    loss = loss + kurtosis_loss
 
-                    step_logs["metrics/std_divergence"]      = true_std.mean().item()      - pred_std.mean().item()
-                    step_logs["metrics/skew_divergence"]     = true_skews.mean().item()    - pred_skews.mean().item()
-                    step_logs["metrics/kurtosis_divergence"] = true_kurtoses.mean().item() - pred_kurtoses.mean().item()
+                    #step_logs["metrics/std_divergence"]      = true_std.mean().item()      - pred_std.mean().item()
+                    #step_logs["metrics/skew_divergence"]     = true_skews.mean().item()    - pred_skews.mean().item()
+                    #step_logs["metrics/kurtosis_divergence"] = true_kurtoses.mean().item() - pred_kurtoses.mean().item()
 
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
@@ -975,13 +975,12 @@ class NetworkTrainer:
                     keys_scaled, mean_norm, maximum_norm = None, None, None
 
                 optimizer_eval_if_needed()
-
+                example_tuple = (latents, batch["captions"])
                 # Checks if the accelerator has performed an optimization step behind the scenes
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     global_step += 1
-
-                    self.sample_images(accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
+                    self.sample_images(accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet, example_tuple)
 
                     # 指定ステップごとにモデルを保存
                     if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:

@@ -5219,6 +5219,7 @@ def sample_images_common(
     tokenizer,
     text_encoder,
     unet,
+    example_tuple=None,
     prompt_replacement=None,
     controlnet=None,
 ):
@@ -5310,15 +5311,25 @@ def sample_images_common(
     try:
         cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
     except Exception:
-        pass
-
+        pass  
     if distributed_state.num_processes <= 1:
         # If only one device is available, just use the original prompt list. We don't need to care about the distribution of prompts.
         with torch.no_grad():
+            idx = 0
             for prompt_dict in prompts:
+                if prompt_dict.get("prompt") == '__caption__' and example_tuple:
+                    while example_tuple[1][idx] == '':
+                        idx = (idx + 1) % len(example_tuple[1])
+                        if idx == 0:
+                            break
+                    prompt_dict["prompt"] = example_tuple[1][idx] 
+                    prompt_dict["height"] = example_tuple[0].shape[2] * 8
+                    prompt_dict["width"] = example_tuple[0].shape[3] * 8
+                    prompt_dict["original_lantent"] = example_tuple[0][idx].unsqueeze(0)
+                    idx = (idx + 1) % len(example_tuple[1])
                 sample_image_inference(
-                    accelerator, args, pipeline, save_dir, prompt_dict, epoch, steps, prompt_replacement, controlnet=controlnet
-                )
+                        accelerator, args, pipeline, save_dir, prompt_dict, epoch, steps, prompt_replacement, controlnet=controlnet
+                    )
     else:
         # Creating list with N elements, where each element is a list of prompt_dicts, and N is the number of processes available (number of devices available)
         # prompt_dicts are assigned to lists based on order of processes, to attempt to time the image creation time to match enum order. Probably only works when steps and sampler are identical.
@@ -5330,7 +5341,7 @@ def sample_images_common(
             with distributed_state.split_between_processes(per_process_prompts) as prompt_dict_lists:
                 for prompt_dict in prompt_dict_lists[0]:
                     sample_image_inference(
-                        accelerator, args, pipeline, save_dir, prompt_dict, epoch, steps, prompt_replacement, controlnet=controlnet
+                        accelerator, args, pipeline, save_dir, prompt_dict, epoch, steps, prompt_replacement, example_tuple=example_tuple, controlnet=controlnet
                     )
 
     # clear pipeline and cache to reduce vram usage
@@ -5346,6 +5357,40 @@ def sample_images_common(
         torch.cuda.set_rng_state(cuda_rng_state)
     vae.to(org_vae_device)
 
+def draw_text_on_image(text, max_width, text_color="black"):
+    from PIL import ImageDraw, ImageFont, Image
+    import textwrap
+
+    font = ImageFont.truetype("arial.ttf", 20)
+    space_width = font.getbbox(' ')[2]
+
+    def wrap_text(text, font, max_width):
+        words = text.split(' ')
+        lines = []
+        current_line = ""
+        for word in words:
+            test_line = current_line + word + " "
+            if font.getbbox(test_line)[2] <= max_width:
+                current_line = test_line
+            else:
+                lines.append(current_line)
+                current_line = word + " "
+        lines.append(current_line)
+        return lines
+
+    lines = wrap_text(text, font, max_width - 10)
+    text_height = sum([font.getbbox(line)[3] - font.getbbox(line)[1] for line in lines]) + 20
+    text_image = Image.new('RGB', (max_width, text_height), 'white')
+    text_draw = ImageDraw.Draw(text_image)
+
+    y_text = 10
+    for line in lines:
+        bbox = text_draw.textbbox((0, 0), line, font=font)
+        height = bbox[3] - bbox[1]
+        text_draw.text((10, y_text), line, font=font, fill=text_color)
+        y_text += height
+
+    return text_image
 
 def sample_image_inference(
     accelerator: Accelerator,
@@ -5361,12 +5406,12 @@ def sample_image_inference(
     assert isinstance(prompt_dict, dict)
     negative_prompt = prompt_dict.get("negative_prompt")
     sample_steps = prompt_dict.get("sample_steps", 30)
-    width = prompt_dict.get("width", 512)
+    width =  prompt_dict.get("width", 512)
     height = prompt_dict.get("height", 512)
     scale = prompt_dict.get("scale", 7.5)
     seed = prompt_dict.get("seed")
     controlnet_image = prompt_dict.get("controlnet_image")
-    prompt: str = prompt_dict.get("prompt", "")
+    prompt: str = prompt_dict.get("prompt")
     sampler_name: str = prompt_dict.get("sample_sampler", args.sample_sampler)
 
     if prompt_replacement is not None:
@@ -5391,9 +5436,10 @@ def sample_image_inference(
     if controlnet_image is not None:
         controlnet_image = Image.open(controlnet_image).convert("RGB")
         controlnet_image = controlnet_image.resize((width, height), Image.LANCZOS)
-
+       
     height = max(64, height - height % 8)  # round to divisible by 8
     width = max(64, width - width % 8)  # round to divisible by 8
+        
     logger.info(f"prompt: {prompt}")
     logger.info(f"negative_prompt: {negative_prompt}")
     logger.info(f"height: {height}")
@@ -5417,8 +5463,17 @@ def sample_image_inference(
 
     with torch.cuda.device(torch.cuda.current_device()):
         torch.cuda.empty_cache()
-
+    
     image = pipeline.latents_to_image(latents)[0]
+    if "original_lantent" in prompt_dict:
+        original_latent = prompt_dict.get("original_lantent")
+        original_image = pipeline.latents_to_image(original_latent)[0]
+        text_image = draw_text_on_image(f"caption: {prompt}", image.width * 2)
+        new_image = Image.new('RGB', (original_image.width + image.width, original_image.height + text_image.height))
+        new_image.paste(original_image, (0, text_image.height))
+        new_image.paste(image, (original_image.width, text_image.height))
+        new_image.paste(text_image, (0, 0))
+        image = new_image
 
     # adding accelerator.wait_for_everyone() here should sync up and ensure that sample images are saved in the same order as the original prompt list
     # but adding 'enum' to the filename should be enough
