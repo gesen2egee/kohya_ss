@@ -1,5 +1,5 @@
 -e . # no_verify leave this to specify not checking this a verification stage
-accelerate==0.29.2
+accelerate==0.30.0 
 aiofiles==23.2.1
 altair==4.2.2
 bitsandbytes==0.43.0
