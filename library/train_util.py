@@ -1381,7 +1381,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 image = None
             elif image_info.latents_npz is not None:  # FineTuningDatasetまたはcache_latents_to_disk=Trueの場合
                 latents, original_size, crop_ltrb, flipped_latents, alpha_mask = (
-                    self.latents_caching_strategy.load_latents_from_disk(image_info.latents_npz)
+                    self.latents_caching_strategy.load_latents_from_disk(image_info.latents_npz, image_info.bucket_reso)
                 )
                 if flipped:
                     latents = flipped_latents
@@ -2627,7 +2627,7 @@ class MinimalDataset(BaseDataset):
         raise NotImplementedError
 
 
-def load_arbitrary_dataset(args, tokenizer) -> MinimalDataset:
+def load_arbitrary_dataset(args, tokenizer=None) -> MinimalDataset:
     module = ".".join(args.dataset_class.split(".")[:-1])
     dataset_class = args.dataset_class.split(".")[-1]
     module = importlib.import_module(module)
@@ -3161,7 +3161,7 @@ SS_METADATA_MINIMUM_KEYS = [
 
 
 def build_minimum_network_metadata(
-    v2: Optional[bool],
+    v2: Optional[str],
     base_model: Optional[str],
     network_module: str,
     network_dim: str,

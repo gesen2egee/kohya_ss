@@ -64,22 +64,25 @@ class FluxTextEncodingStrategy(TextEncodingStrategy):
         l_tokens, t5_tokens = tokens[:2]
         t5_attn_mask = tokens[2] if len(tokens) > 2 else None
 
+        # clip_l is None when using T5 only
         if clip_l is not None and l_tokens is not None:
             l_pooled = clip_l(l_tokens.to(clip_l.device))["pooler_output"]
         else:
             l_pooled = None
 
+        # t5xxl is None when using CLIP only
         if t5xxl is not None and t5_tokens is not None:
             # t5_out is [b, max length, 4096]
-            t5_out, _ = t5xxl(t5_tokens.to(t5xxl.device), return_dict=False, output_hidden_states=True)
-            if apply_t5_attn_mask:
-                t5_out = t5_out * t5_attn_mask.to(t5_out.device).unsqueeze(-1)
+            attention_mask = None if not apply_t5_attn_mask else t5_attn_mask.to(t5xxl.device)
+            t5_out, _ = t5xxl(t5_tokens.to(t5xxl.device), attention_mask, return_dict=False, output_hidden_states=True)
+            # if zero_pad_t5_output:
+            #     t5_out = t5_out * t5_attn_mask.to(t5_out.device).unsqueeze(-1)
             txt_ids = torch.zeros(t5_out.shape[0], t5_out.shape[1], 3, device=t5_out.device)
         else:
             t5_out = None
             txt_ids = None
 
-        return [l_pooled, t5_out, txt_ids]
+        return [l_pooled, t5_out, txt_ids, t5_attn_mask]  # returns t5_attn_mask for attention mask in transformer
 
 
 class FluxTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
@@ -115,6 +118,8 @@ class FluxTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
                 return False
             if "txt_ids" not in npz:
                 return False
+            if "t5_attn_mask" not in npz:
+                return False
         except Exception as e:
             logger.error(f"Error loading file: {npz_path}")
             raise e
@@ -129,12 +134,12 @@ class FluxTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         l_pooled = data["l_pooled"]
         t5_out = data["t5_out"]
         txt_ids = data["txt_ids"]
+        t5_attn_mask = data["t5_attn_mask"]
 
         if self.apply_t5_attn_mask:
-            t5_attn_mask = data["t5_attn_mask"]
             t5_out = self.mask_t5_attn(t5_out, t5_attn_mask)
 
-        return [l_pooled, t5_out, txt_ids]
+        return [l_pooled, t5_out, txt_ids, t5_attn_mask]
 
     def cache_batch_outputs(
         self, tokenize_strategy: TokenizeStrategy, models: List[Any], text_encoding_strategy: TextEncodingStrategy, infos: List
@@ -145,7 +150,7 @@ class FluxTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         tokens_and_masks = tokenize_strategy.tokenize(captions)
         with torch.no_grad():
             # attn_mask is not applied when caching to disk: it is applied when loading from disk
-            l_pooled, t5_out, txt_ids = flux_text_encoding_strategy.encode_tokens(
+            l_pooled, t5_out, txt_ids, _ = flux_text_encoding_strategy.encode_tokens(
                 tokenize_strategy, models, tokens_and_masks, not self.cache_to_disk
             )
 
@@ -159,15 +164,15 @@ class FluxTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         l_pooled = l_pooled.cpu().numpy()
         t5_out = t5_out.cpu().numpy()
         txt_ids = txt_ids.cpu().numpy()
+        t5_attn_mask = tokens_and_masks[2].cpu().numpy()
 
         for i, info in enumerate(infos):
             l_pooled_i = l_pooled[i]
             t5_out_i = t5_out[i]
             txt_ids_i = txt_ids[i]
+            t5_attn_mask_i = t5_attn_mask[i]
 
             if self.cache_to_disk:
-                t5_attn_mask = tokens_and_masks[2]
-                t5_attn_mask_i = t5_attn_mask[i].cpu().numpy()
                 np.savez(
                     info.text_encoder_outputs_npz,
                     l_pooled=l_pooled_i,
@@ -176,7 +181,7 @@ class FluxTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
                     t5_attn_mask=t5_attn_mask_i,
                 )
             else:
-                info.text_encoder_outputs = (l_pooled_i, t5_out_i, txt_ids_i)
+                info.text_encoder_outputs = (l_pooled_i, t5_out_i, txt_ids_i, t5_attn_mask_i)
 
 
 class FluxLatentsCachingStrategy(LatentsCachingStrategy):
@@ -200,7 +205,12 @@ class FluxLatentsCachingStrategy(LatentsCachingStrategy):
         )
 
     def is_disk_cached_latents_expected(self, bucket_reso: Tuple[int, int], npz_path: str, flip_aug: bool, alpha_mask: bool):
-        return self._default_is_disk_cached_latents_expected(8, bucket_reso, npz_path, flip_aug, alpha_mask)
+        return self._default_is_disk_cached_latents_expected(8, bucket_reso, npz_path, flip_aug, alpha_mask, True)
+
+    def load_latents_from_disk(
+        self, npz_path: str, bucket_reso: Tuple[int, int]
+    ) -> Tuple[Optional[np.ndarray], Optional[List[int]], Optional[List[int]], Optional[np.ndarray], Optional[np.ndarray]]:
+        return self._default_load_latents_from_disk(8, npz_path, bucket_reso)  # support multi-resolution
 
     # TODO remove circular dependency for ImageInfo
     def cache_batch_latents(self, vae, image_infos: List, flip_aug: bool, alpha_mask: bool, random_crop: bool):
@@ -208,7 +218,9 @@ class FluxLatentsCachingStrategy(LatentsCachingStrategy):
         vae_device = vae.device
         vae_dtype = vae.dtype
 
-        self._default_cache_batch_latents(encode_by_vae, vae_device, vae_dtype, image_infos, flip_aug, alpha_mask, random_crop)
+        self._default_cache_batch_latents(
+            encode_by_vae, vae_device, vae_dtype, image_infos, flip_aug, alpha_mask, random_crop, True
+        )
 
         if not train_util.HIGH_VRAM:
             train_util.clean_memory_on_device(vae.device)

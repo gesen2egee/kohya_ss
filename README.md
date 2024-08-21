@@ -9,6 +9,53 @@ __Please update PyTorch to 2.4.0. We have tested with `torch==2.4.0` and `torchv
 The command to install PyTorch is as follows:
 `pip3 install torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu124`
 
+Aug 21, 2024 (update 2):
+Fixed an error in applying mask in Attention. The attention mask was float, but it should be bool. 
+
+Added a script `convert_flux_lora.py` to convert LoRA between sd-scripts format (BFL-based) and AI-toolkit format (Diffusers-based). See `--help` for details. BFL-based LoRA has a large module, so converting it to Diffusers format may reduce temporary memory usage in the inference environment. Note that re-conversion will increase the size of LoRA.
+
+
+Aug 21, 2024:
+The specification of `--apply_t5_attn_mask` has been changed. Previously, the T5 output was zero-padded, but now, two steps are taken: "1. Apply mask when encoding T5" and "2. Apply mask in the attention of Double Block". Fine tuning, LoRA training, and inference in `flux_mini_inference.py` have been changed.
+
+Aug 20, 2024 (update 3):
+__Experimental__  The multi-resolution training is now supported with caching latents to disk.
+
+The cache files now hold latents for multiple resolutions. Since the latents are appended to the current cache file, it is recommended to delete the cache file in advance (if not, the old latents is kept in .npz file).
+
+See [FLUX.1 Multi-resolution training](#flux1-multi-resolution-training) for details.
+
+Aug 20, 2024 (update 2):
+`flux_merge_lora.py` now supports LoRA from AI-toolkit (Diffusers based keys). Specify `--diffusers` option to merge LoRA with Diffusers based keys. Thanks to exveria1015!
+
+Aug 20, 2024:
+FLUX.1 supports multi-resolution inference, so training at multiple resolutions may be possible and the results may be improved (like 1024x1024, 768x768 and 512x512 ... you can use any resolution).
+
+The script seems to support multi-resolution even in the current version, ~~if `--cache_latents_to_disk` is not specified~~ -> `--cache_latents_to_disk` is now supported for multi-resolution training. Please try if you are interested. See [FLUX.1 Multi-resolution training](#flux1-multi-resolution-training) for details.
+
+We will support multi-resolution caching to disk in the near future.
+
+Aug 19, 2024:
+In `flux_train.py`, the memory consumption during model saving is reduced when `--save_precision` is set to the same value as `--mixed_precision` (about 22GB). Please set the same value unless there is a reason.
+
+An experimental option `--mem_eff_save` is also added. When specified, it can further reduce memory consumption (about 22GB), but since it is a custom implementation, unexpected problems may occur. We do not recommend using it unless you are familiar with the code.
+
+Aug 18, 2024:
+Memory-efficient training based on 2kpr's implementation is implemented in `flux_train.py`. Thanks to 2kpr! See [FLUX.1 fine-tuning](#flux1-fine-tuning) for details.
+
+Aug 17, 2024:
+Added a script `flux_train.py` to train FLUX.1. The script is experimental and not an optimized version. It needs >28GB VRAM for training. 
+
+Aug 16, 2024: 
+
+Added a script `networks/flux_merge_lora.py` to merge LoRA into FLUX.1 checkpoint. See [Merge LoRA to FLUX.1 checkpoint](#merge-lora-to-flux1-checkpoint) for details.
+
+FLUX.1 schnell model based training is now supported (but not tested). If the name of the model file contains `schnell`, the model is treated as a schnell model. 
+
+Added `--t5xxl_max_token_length` option to specify the maximum token length of T5XXL. The default is 512 in dev and 256 in schnell.
+
+Previously, when `--max_token_length` was specified, that value was used, and 512 was used when omitted (default). Therefore, there is no impact if `--max_token_length` was not specified. If `--max_token_length` was specified, please specify `--t5xxl_max_token_length` instead. `--max_token_length` is ignored during FLUX.1 training.
+
 Aug 14, 2024: Sample image generation during training is now supported. Specify options such as `--sample_prompts` and `--sample_every_n_epochs`. It will be very slow when `--split_mode` is specified.
 
 Aug 13, 2024:  
@@ -25,11 +72,23 @@ Aug 11, 2024: Fix `--apply_t5_attn_mask` option to work. Please remove and re-ge
 
 Aug 10, 2024:  LoRA key prefix is changed to `lora_unet` from `lora_flex` to make it compatible with ComfyUI.
 
-We have added a new training script for LoRA training. The script is `flux_train_network.py`. See `--help` for options. Sample command is below, settings are based on [AI Toolkit by Ostris](https://github.com/ostris/ai-toolkit). It will work with 24GB VRAM GPUs.
+
+### FLUX.1 LoRA training
+
+We have added a new training script for LoRA training. The script is `flux_train_network.py`. See `--help` for options. Sample command is below, settings are based on [AI Toolkit by Ostris](https://github.com/ostris/ai-toolkit). It will work with 24GB VRAM GPUs. 
 
 ```
-accelerate launch  --mixed_precision bf16 --num_cpu_threads_per_process 1 flux_train_network.py --pretrained_model_name_or_path flux1-dev.sft --clip_l sd3/clip_l.safetensors --t5xxl sd3/t5xxl_fp16.safetensors --ae ae.sft --cache_latents_to_disk --save_model_as safetensors --sdpa --persistent_data_loader_workers --max_data_loader_n_workers 2 --seed 42 --gradient_checkpointing --mixed_precision bf16 --save_precision bf16 --network_module networks.lora_flux --network_dim 4 --optimizer_type adamw8bit --learning_rate 1e-4 --network_train_unet_only --cache_text_encoder_outputs --cache_text_encoder_outputs_to_disk --fp8_base --highvram --max_train_epochs 4 --save_every_n_epochs 1 --dataset_config dataset_1024_bs2.toml --output_dir path/to/output/dir --output_name flux-lora-name --timestep_sampling sigmoid --model_prediction_type raw --guidance_scale 1.0 --loss_type l2
+accelerate launch  --mixed_precision bf16 --num_cpu_threads_per_process 1 flux_train_network.py 
+--pretrained_model_name_or_path flux1-dev.sft --clip_l sd3/clip_l.safetensors --t5xxl sd3/t5xxl_fp16.safetensors 
+--ae ae.sft --cache_latents_to_disk --save_model_as safetensors --sdpa --persistent_data_loader_workers 
+--max_data_loader_n_workers 2 --seed 42 --gradient_checkpointing --mixed_precision bf16 --save_precision bf16 
+--network_module networks.lora_flux --network_dim 4 --optimizer_type adamw8bit --learning_rate 1e-4 
+--network_train_unet_only --cache_text_encoder_outputs --cache_text_encoder_outputs_to_disk --fp8_base 
+--highvram --max_train_epochs 4 --save_every_n_epochs 1 --dataset_config dataset_1024_bs2.toml 
+--output_dir path/to/output/dir --output_name flux-lora-name --timestep_sampling sigmoid 
+--model_prediction_type raw --guidance_scale 1.0 --loss_type l2
 ```
+(The command is multi-line for readability. Please combine it into one line.)
 
 The training can be done with 16GB VRAM GPUs with Adafactor optimizer. Please use settings like below:
 
@@ -66,10 +125,111 @@ The trained LoRA model can be used with ComfyUI.
 
 The inference script is also available. The script is `flux_minimal_inference.py`. See `--help` for options. 
 
-Aug 12: `--interactive` option is now working.
-
 ```
 python flux_minimal_inference.py --ckpt flux1-dev.sft --clip_l sd3/clip_l.safetensors --t5xxl sd3/t5xxl_fp16.safetensors --ae ae.sft --dtype bf16 --prompt "a cat holding a sign that says hello world" --out path/to/output/dir --seed 1 --flux_dtype fp8 --offload --lora lora-flux-name.safetensors;1.0
+```
+
+### FLUX.1 fine-tuning
+
+Sample command for FLUX.1 fine-tuning is below. This will work with 24GB VRAM GPUs, and 64GB main memory is recommended. 
+
+```
+accelerate launch  --mixed_precision bf16 --num_cpu_threads_per_process 1 flux_train.py   
+--pretrained_model_name_or_path flux1-dev.sft  --clip_l clip_l.safetensors --t5xxl t5xxl_fp16.safetensors --ae ae_dev.sft 
+--save_model_as safetensors --sdpa --persistent_data_loader_workers --max_data_loader_n_workers 2 
+--seed 42 --gradient_checkpointing --mixed_precision bf16 --save_precision bf16 
+--dataset_config dataset_1024_bs1.toml  --output_dir path/to/output/dir --output_name output-name 
+--learning_rate 5e-5 --max_train_epochs 4  --sdpa --highvram --cache_text_encoder_outputs_to_disk --cache_latents_to_disk --save_every_n_epochs 1 
+--optimizer_type adafactor --optimizer_args "relative_step=False" "scale_parameter=False" "warmup_init=False" 
+--timestep_sampling sigmoid --model_prediction_type raw --guidance_scale 1.0 
+--blockwise_fused_optimizers  --double_blocks_to_swap 6 --cpu_offload_checkpointing
+```
+
+(Combine the command into one line.)
+
+Sample image generation during training is not tested yet.
+
+Options are almost the same as LoRA training. The difference is `--blockwise_fused_optimizers`, `--double_blocks_to_swap` and `--cpu_offload_checkpointing`.  `--single_blocks_to_swap` is also available.
+
+`--blockwise_fused_optimizers` enables the fusing of the optimizer for each block. This is similar to `--fused_backward_pass`. Any optimizer can be used, but Adafactor is recommended for memory efficiency. `--fused_optimizer_groups` is deprecated due to the addition of this option for FLUX.1 training.
+
+`--double_blocks_to_swap` and `--single_blocks_to_swap` are the number of double blocks and single blocks to swap. The default is None (no swap). These options must be combined with `--blockwise_fused_optimizers`. 
+
+`--cpu_offload_checkpointing` is to offload the gradient checkpointing to CPU. This reduces about 2GB of VRAM usage.
+
+All these options are experimental and may change in the future.
+
+The increasing the number of blocks to swap may reduce the memory usage, but the training speed will be slower. `--cpu_offload_checkpointing` also slows down the training.
+
+Swap 6 double blocks and use cpu offload checkpointing may be a good starting point. Please try different settings according to VRAM usage and training speed.
+
+The learning rate and the number of epochs are not optimized yet. Please adjust them according to the training results.
+
+### Merge LoRA to FLUX.1 checkpoint
+
+`networks/flux_merge_lora.py` merges LoRA to FLUX.1 checkpoint. __The script is experimental.__ 
+
+```
+python networks/flux_merge_lora.py --flux_model flux1-dev.sft --save_to output.safetensors --models lora1.safetensors --ratios 2.0 --save_precision fp16 --loading_device cuda --working_device cpu
+```
+
+You can also merge multiple LoRA models into a FLUX.1 model. Specify multiple LoRA models in `--models`. Specify the same number of ratios in `--ratios`.
+
+`--loading_device` is the device to load the LoRA models. `--working_device` is the device to merge (calculate) the models. Default is `cpu` for both. Loading / working device examples are below (in the case of `--save_precision fp16` or `--save_precision bf16`):
+
+- 'cpu' / 'cpu': Uses >50GB of RAM, but works on any machine.
+- 'cuda' / 'cpu': Uses 24GB of VRAM, but requires 30GB of RAM.
+- 'cuda' / 'cuda': Uses 30GB of VRAM, but requires 30GB of RAM, faster than 'cuda' / 'cpu'.
+
+In the case of LoRA models are trained with `bf16`, we are not sure which is better, `fp16` or `bf16` for `--save_precision`.
+
+The script can merge multiple LoRA models. If you want to merge multiple LoRA models, specify `--concat` option to work the merged LoRA model properly.
+
+### FLUX.1 Multi-resolution training
+
+You can define multiple resolutions in the dataset configuration file.
+
+The dataset configuration file is like below. You can define multiple resolutions with different batch sizes. The resolutions are defined in the `[[datasets]]` section. The `[[datasets.subsets]]` section is for the dataset directory. Please specify the same directory for each resolution.
+
+```
+[general]
+# define common settings here
+flip_aug = true
+color_aug = false
+keep_tokens_separator= "|||"
+shuffle_caption = false
+caption_tag_dropout_rate = 0
+caption_extension = ".txt"
+
+[[datasets]]
+# define the first resolution here
+batch_size = 2
+enable_bucket = true
+resolution = [1024, 1024]
+
+  [[datasets.subsets]]
+  image_dir = "path/to/image/dir"
+  num_repeats = 1
+
+[[datasets]]
+# define the second resolution here
+batch_size = 3
+enable_bucket = true
+resolution = [768, 768]
+
+  [[datasets.subsets]]
+  image_dir = "path/to/image/dir"
+  num_repeats = 1
+
+[[datasets]]
+# define the third resolution here
+batch_size = 4
+enable_bucket = true
+resolution = [512, 512]
+
+  [[datasets.subsets]]
+  image_dir = "path/to/image/dir"
+  num_repeats = 1
 ```
 
 ## SD3 training
@@ -262,7 +422,7 @@ The majority of scripts is licensed under ASL 2.0 (including codes from Diffuser
 
 - Fused optimizer is available for SDXL training. PR [#1259](https://github.com/kohya-ss/sd-scripts/pull/1259) Thanks to 2kpr!
   - The memory usage during training is significantly reduced by integrating the optimizer's backward pass with step. The training results are the same as before, but if you have plenty of memory, the speed will be slower.
-  - Specify the `--fused_backward_pass` option in `sdxl_train.py`. At this time, only AdaFactor is supported. Gradient accumulation is not available.
+  - Specify the `--fused_backward_pass` option in `sdxl_train.py`. At this time, only Adafactor is supported. Gradient accumulation is not available.
   - Setting mixed precision to `no` seems to use less memory than `fp16` or `bf16`.
   - Training is possible with a memory usage of about 17GB with a batch size of 1 and fp32. If you specify the `--full_bf16` option, you can further reduce the memory usage (but the accuracy will be lower). With the same memory usage as before, you can increase the batch size.
   - PyTorch 2.1 or later is required because it uses the new API `Tensor.register_post_accumulate_grad_hook(hook)`.
@@ -272,7 +432,7 @@ The majority of scripts is licensed under ASL 2.0 (including codes from Diffuser
   - Memory usage is reduced by the same principle as Fused optimizer. The training results and speed are the same as Fused optimizer.
   - Specify the number of groups like `--fused_optimizer_groups 10` in `sdxl_train.py`. Increasing the number of groups reduces memory usage but slows down training. Since the effect is limited to a certain number, it is recommended to specify 4-10.
   - Any optimizer can be used, but optimizers that automatically calculate the learning rate (such as D-Adaptation and Prodigy) cannot be used. Gradient accumulation is not available.
-  - `--fused_optimizer_groups` cannot be used with `--fused_backward_pass`. When using AdaFactor, the memory usage is slightly larger than with Fused optimizer. PyTorch 2.1 or later is required.
+  - `--fused_optimizer_groups` cannot be used with `--fused_backward_pass`. When using Adafactor, the memory usage is slightly larger than with Fused optimizer. PyTorch 2.1 or later is required.
   - Mechanism: While Fused optimizer performs backward/step for individual parameters within the optimizer, optimizer groups reduce memory usage by grouping parameters and creating multiple optimizers to perform backward/step for each group. Fused optimizer requires implementation on the optimizer side, while optimizer groups are implemented only on the training script side.
 
 - LoRA+ is supported. PR [#1233](https://github.com/kohya-ss/sd-scripts/pull/1233) Thanks to rockerBOO!
@@ -325,7 +485,7 @@ https://github.com/kohya-ss/sd-scripts/pull/1290) Thanks to frodo821!
 
 - SDXL の学習時に Fused optimizer が使えるようになりました。PR [#1259](https://github.com/kohya-ss/sd-scripts/pull/1259) 2kpr 氏に感謝します。
   - optimizer の backward pass に step を統合することで学習時のメモリ使用量を大きく削減します。学習結果は未適用時と同一ですが、メモリが潤沢にある場合は速度は遅くなります。
-  - `sdxl_train.py` に `--fused_backward_pass` オプションを指定してください。現時点では optimizer は AdaFactor のみ対応しています。また gradient accumulation は使えません。
+  - `sdxl_train.py` に `--fused_backward_pass` オプションを指定してください。現時点では optimizer は Adafactor のみ対応しています。また gradient accumulation は使えません。
   - mixed precision は `no` のほうが `fp16` や `bf16` よりも使用メモリ量が少ないようです。
   - バッチサイズ 1、fp32 で 17GB 程度で学習可能なようです。`--full_bf16` オプションを指定するとさらに削減できます（精度は劣ります）。以前と同じメモリ使用量ではバッチサイズを増やせます。
   - PyTorch 2.1 以降の新 API `Tensor.register_post_accumulate_grad_hook(hook)` を使用しているため、PyTorch 2.1 以降が必要です。
