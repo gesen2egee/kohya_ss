@@ -8,6 +8,6 @@ accelerate launch  --mixed_precision bf16 --num_cpu_threads_per_process 6 flux_t
 :: 24G VRAM 再加上 --highvram
 
 :: flux1-dev.safetensors ae.safetensors
-:: 請至 https://huggingface.co/stabilityai/stable-diffusion-3-medium/tree/main/text_encoders 下載
-:: t5xxl_fp16.safetensors clip_l.safetensors 
 :: 請至 https://huggingface.co/black-forest-labs/FLUX.1-dev/tree/main 下載
+:: t5xxl_fp16.safetensors clip_l.safetensors 
+:: 請至 https://huggingface.co/stabilityai/stable-diffusion-3-medium/tree/main/text_encoders 下載
