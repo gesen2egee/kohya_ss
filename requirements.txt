@@ -1,3 +1,5 @@
+# albumentations==1.3.0
+# gradio==3.16.2
 accelerate==0.33.0
 adam-mini==1.0.1
 aiofiles==23.2.1
@@ -25,7 +27,7 @@ prodigyopt==1.0
 protobuf==3.20.3
 pytorch-lightning==1.9.0
 rich==13.7.0
-safetensors==0.4.2
+safetensors==0.4.4
 schedulefree
 scipy==1.11.4
 sentencepiece==0.2.0
