@@ -32,7 +32,7 @@ set /A WARMUP_STEPS=%MAX_TRAIN_STEPS%/10
 
 :: 設定模型變數
 set PRETRAINED_MODEL=D:/SDXL/webui_forge_cu121_torch231/webui/models/Stable-diffusion/flux1-dev.safetensors
-set VAE_MODEL_DIR=D:/SDXL/webui_forge_cu121_torch231/webui/models/VAE
+set VAE_MODEL_DIR=D:/SDXL/webui_forge_cu121_torch231/webui/models/VAE/ae.safetensors
 set CLIP_L_MODEL=D:/SDXL/webui_forge_cu121_torch231/webui/models/VAE/clip_l.safetensors
 set T5XXL_MODEL=D:/SDXL/webui_forge_cu121_torch231/webui/models/VAE/t5xxl_fp16.safetensors
 
